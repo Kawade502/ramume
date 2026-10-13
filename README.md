@@ -14,7 +14,11 @@ npm install
 npm run dev
 ```
 
-http://localhost:5183 を開きます。`npm run build` を実行すると `dist/` に静的ファイルができるので、GitHub Pages などにそのまま置けます。
+http://localhost:5183 を開きます。
+
+公開版：https://kawade502.github.io/ramume/ （`main` に push すると [GitHub Actions](.github/workflows/pages.yml) が自動でビルドして公開します）
+
+ローカルで `npm run build` を実行すると `dist/` に静的ファイルができるので、GitHub Pages などにそのまま置けます。
 
 | 操作 | 動き |
 | --- | --- |
