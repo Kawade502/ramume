@@ -59,15 +59,17 @@ const LIP_RO = OUTER[OUTER.length - 1][0];
 const LIP_RI = INNER[INNER.length - 1][0];
 export const LIP = { y: LIP_Y, rc: (LIP_RO + LIP_RI) / 2, rt: (LIP_RO - LIP_RI) / 2 };
 
-// くびれの左右にある 2 つの凹み。開けたビー玉はここで止まる。
-export const DIMPLE = { y: 130, w: 3.6, depth: 5.4 };
+// くびれの左右（ローカル座標の ±x）にある 2 つの凹み。開けたビー玉はここで止まる。
+// 幅を広くとってあるので、瓶をどう傾けてもビー玉は胴まで落ちない。
+export const DIMPLE = { y: 130, w: 3.8, depth: 5.4 };
 
 // 底：外側はわずかに上げ底、内側は縁に向かってせり上がる厚いガラス。
 export const BASE = { punt: 1.0, puntR: 22, innerY: 7, innerRise: 2.5, innerR: 26.6 };
 
 export const MARBLE_R = 8.5;
 export const LEVEL = 118;
-export const SPILL = 5;
+// 開けたときにあふれて減る量 (mm³)。実物と同じく、ほんの少し。
+export const SPILL = 1500;
 
 // 青いキャップ。口を囲むリングと、ビー玉を押し込む玉押し。
 export const CAP = {
@@ -160,7 +162,7 @@ export function sdBottle(x, y, z) {
   let r = Math.hypot(x, z);
   const c = r > 1e-4 ? x / r : 0;
   const dy = (y - DIMPLE.y) / DIMPLE.w;
-  r += DIMPLE.depth * Math.exp(-dy * dy) * Math.pow(c, 16);
+  r += DIMPLE.depth * Math.exp(-dy * dy) * c * c * c * c;
   const [ro, dro, ri, dri] = profileAt(y);
   const dOut = (r - ro) / Math.sqrt(1 + dro * dro);
   const dIn = (r - ri) / Math.sqrt(1 + dri * dri);
@@ -215,3 +217,62 @@ CAP.collarRo = CAP.collarRi + 2.0;
 // 押す前の玉押しの下端（ビー玉のてっぺん）。
 CAP.restY = MARBLE_STOPS.seal + MARBLE_R;
 CAP.maxPush = CAP.restY + CAP.stemH - 1 - CAP.collarY1 - 0.3;
+
+// 内部空間の距離場の傾き（外向き）。ビー玉が壁に当たったときの向きに使う。
+export function cavityNormal(x, y, z) {
+  const h = 0.05;
+  const nx = sdBottle(x + h, y, z)[1] - sdBottle(x - h, y, z)[1];
+  const ny = sdBottle(x, y + h, z)[1] - sdBottle(x, y - h, z)[1];
+  const nz = sdBottle(x, y, z + h)[1] - sdBottle(x, y, z - h)[1];
+  const l = Math.hypot(nx, ny, nz) || 1;
+  return [nx / l, ny / l, nz / l];
+}
+
+// ---------------------------------------------------------------- 液面
+
+// 半径 R の円のうち、ある向きへの射影が c より小さい部分の面積。
+function segmentArea(c, R) {
+  if (c <= -R) return 0;
+  if (c >= R) return Math.PI * R * R;
+  return R * R * Math.acos(-c / R) + c * Math.sqrt(R * R - c * c);
+}
+
+const SLICE = 0.25;
+const SLICE_Y0 = BASE.innerY + 0.5;
+
+// 瓶のローカル座標で、上向き up に垂直な面 dot(p, up) = h より下にある液の体積 (mm³)。
+export function volumeBelow(up, h) {
+  const s = Math.hypot(up[0], up[2]);
+  let v = 0;
+  for (let y = SLICE_Y0 + SLICE / 2; y < LIP_Y; y += SLICE) {
+    const R = profileAt(y)[2];
+    if (s < 1e-6) {
+      if (up[1] * y < h) v += Math.PI * R * R * SLICE;
+    } else {
+      v += segmentArea((h - up[1] * y) / s, R) * SLICE;
+    }
+  }
+  return v;
+}
+
+export const LIQUID_VOLUME = volumeBelow([0, 1, 0], LEVEL);
+
+// 体積 volume の液が、上向き up のときにつくる水平な液面の高さ h を二分法で探す。
+export function liquidPlane(up, volume) {
+  let lo = -260;
+  let hi = 260;
+  for (let i = 0; i < 40; i++) {
+    const mid = (lo + hi) / 2;
+    if (volumeBelow(up, mid) < volume) lo = mid;
+    else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+// 瓶を傾けたときに床へ近づく外形の点 [r, y]（キャップを含む）。持ち上げる高さの計算に使う。
+export const OUTLINE = [
+  ...OUTER.map(([r, y]) => [r, y]),
+  [CAP.collarRo, CAP.collarY0],
+  [CAP.collarRo, CAP.collarY1],
+  [CAP.buttonR, CAP.restY + CAP.stemH + CAP.buttonH - 1],
+];

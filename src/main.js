@@ -1,11 +1,24 @@
 import * as THREE from 'three';
 import './style.css';
-import { CAP, LEVEL, MARBLE_R, MARBLE_STOPS, SPILL, makeProfileTexture } from './bottle.js';
+import {
+  CAP,
+  LIP_Y,
+  LIQUID_VOLUME,
+  MARBLE_R,
+  MARBLE_STOPS,
+  OUTLINE,
+  SPILL,
+  liquidPlane,
+  makeProfileTexture,
+  sdBottle,
+} from './bottle.js';
 import { createFizz } from './foam.js';
+import { createMarble } from './marble.js';
 import { createSound } from './sound.js';
 import { BLIT_FRAG, MAX_BUB, MAX_FOAM, TRACE_FRAG, VERT } from './shader.js';
 
 const TARGET = new THREE.Vector3(0, 93, 0);
+const CENTER = new THREE.Vector3(0, 93, 0); // 瓶のローカル座標での真ん中。カメラはここを追う
 const DIST = 560;
 const PITCH = 0.085;
 const TURN_PERIOD = 36; // 回転中、瓶がひと回りする秒数
@@ -13,10 +26,14 @@ const IDLE_REST = 30; // これだけ触られなければ回転を止めて描�
 const STEP = 1 / 120;
 
 const POP_AT = 2.0; // 玉押しをこれだけ押すとビー玉が外れる (mm)
-const GRAVITY = 6000; // ちょっとだけゆっくり落とす (mm/s²)
-const BOUNCE = 0.38;
 const PRESS_RATIO = 0.3; // 画面上で 1mm ドラッグすると 0.3mm 押し込む
 const TAP_SLOP = 6;
+
+const TILT_MAX = THREE.MathUtils.degToRad(120);
+const TILT_PER_PX = 0.0075; // 瓶をつかんで 1px 横に動かしたときの傾き (rad)
+const TILT_KEY = THREE.MathUtils.degToRad(100); // ←→ キーを押している間の傾き
+const PIVOT = new THREE.Vector3(0, 100, 0); // 手で持つあたり。ここを中心に傾ける
+const HOLD_LIFT = 6; // 持ち上げたときに床から浮かせる高さ (mm)
 
 // 自動で押すときの動き [秒, 押し込み mm]。
 const AUTO_PRESS = [
@@ -36,6 +53,7 @@ const hint = document.getElementById('hint');
 const errorBox = document.getElementById('error');
 const again = document.getElementById('again');
 const muteButton = document.getElementById('mute');
+const tiltButton = document.getElementById('tilt');
 
 let renderer;
 try {
@@ -57,8 +75,11 @@ const uniforms = {
   uCamBasis: { value: new THREE.Matrix3() },
   uTanHalf: { value: 0.2 },
   uProf: { value: makeProfileTexture() },
+  uRot: { value: new THREE.Matrix3() },
+  uOrigin: { value: new THREE.Vector3() },
+  uLightL: { value: new THREE.Vector3(0, 1, 0) },
+  uLiq: { value: new THREE.Vector4(0, 1, 0, 118) },
   uMarble: { value: new THREE.Vector4(0, MARBLE_STOPS.seal, 0, MARBLE_R) },
-  uLevel: { value: LEVEL },
   uPushY: { value: CAP.restY },
   uBub: { value: vec4s(MAX_BUB) },
   uBubN: { value: 0 },
@@ -69,8 +90,8 @@ const uniforms = {
   uRipple: { value: 0 },
   uHaze: { value: 0 },
   uTime: { value: 0 },
-  uSpin: { value: new THREE.Vector2(1, 0) },
   uColumn: { value: new THREE.Vector3() },
+  uContact: { value: 1 },
 };
 
 const traceMat = new THREE.RawShaderMaterial({
@@ -103,6 +124,7 @@ blitScene.add(new THREE.Mesh(quad, blitMat));
 // ---------------------------------------------------------------- 状態
 
 const fizz = createFizz();
+const marble = createMarble();
 const sound = createSound();
 
 const st = {
@@ -111,39 +133,62 @@ const st = {
   push: 0, // 玉押しの押し込み (mm)
   pushV: 0,
   pushTarget: 0,
-  marbleY: MARBLE_STOPS.seal,
-  marbleV: 0,
-  marbleFalling: false,
-  level: LEVEL,
+  volume: LIQUID_VOLUME,
   auto: -1, // 自動で押している時間。-1 なら止まっている
+  lastClink: -1,
 };
 
 // 照明は固定したまま瓶を軸まわりに回す（左右対称なので、凹みの向きだけが変わる）。
+// 最初は凹みを手前と奥に向けておく。左右に傾けると、ビー玉が凹みに引っかからずに転がる。
 const view = {
-  spin: 0,
-  spinGoal: 0,
+  spin: Math.PI / 2,
+  spinGoal: Math.PI / 2,
   pitch: PITCH,
   pitchGoal: PITCH,
-  drift: true,
+  drift: false,
   idle: 0,
+  look: TARGET.clone(), // カメラが見ている点
 };
 
-const turning = () => view.drift && view.idle < IDLE_REST;
+// 瓶の姿勢。tilt は画面の右へ傾ける向きが正。held は手で持ち上げている度合い（0〜1）。
+const pose = {
+  tilt: 0,
+  tiltV: 0,
+  tiltGoal: 0,
+  held: 0,
+  heldGoal: 0,
+  lift: 0,
+  liftV: 0,
+  keys: { left: false, right: false },
+  sensor: null, // 傾きセンサーの値 (rad)。使っていなければ null
+};
 
-const pointer = { down: false, mode: null, x: 0, y: 0, startX: 0, startY: 0, startPush: 0, moved: 0 };
+// 瓶のローカル座標 → 世界座標。毎ステップ作り直す。
+const frame = {
+  M: new THREE.Matrix4(),
+  inv: new THREE.Matrix4(),
+  R: new THREE.Matrix3(),
+  up: [0, 1, 0], // 世界の上向きを、瓶のローカル座標で表したもの
+  down: [0, -1, 0],
+  liqD: 118, // 液面 dot(p, up) = liqD
+};
+let planeKey = '';
+
+const turning = () => view.drift && view.idle < IDLE_REST && pose.held < 0.01 && Math.abs(pose.tilt) < 0.01;
+
+const pointer = { down: false, mode: null, x: 0, y: 0, startX: 0, startY: 0, startPush: 0, startTilt: 0, moved: 0 };
 
 function reset() {
   st.open = false;
   st.push = 0;
   st.pushV = 0;
   st.pushTarget = 0;
-  st.marbleY = MARBLE_STOPS.seal;
-  st.marbleV = 0;
-  st.marbleFalling = false;
-  st.level = LEVEL;
+  st.volume = LIQUID_VOLUME;
   st.auto = -1;
+  marble.reset();
   fizz.reset();
   sound.setFizz(0, 0, 0);
+  sound.setRoll(0);
   sound.thunk();
   updateHint();
   wake();
@@ -151,9 +196,8 @@ function reset() {
 
 function pop() {
   st.open = true;
-  st.marbleFalling = true;
-  st.marbleV = -180;
-  fizz.open(st.level);
+  marble.release(180);
+  fizz.open(levelOnAxis());
   sound.pop(1);
   updateHint();
 }
@@ -177,6 +221,47 @@ function sample(frames, t) {
   return frames[frames.length - 1][1];
 }
 
+// 液面が軸と交わる高さ（首の泡の層に使う）。
+function levelOnAxis() {
+  return frame.up[1] > 0.3 ? frame.liqD / frame.up[1] : frame.liqD;
+}
+
+// 瓶の姿勢から、ローカル → 世界の変換と、液面を求める。
+const _q = new THREE.Quaternion();
+const _qs = new THREE.Quaternion();
+const _v = new THREE.Vector3();
+const _look = new THREE.Vector3();
+function updateFrame() {
+  _q.setFromAxisAngle(new THREE.Vector3(0, 0, 1), -pose.tilt);
+  _qs.setFromAxisAngle(new THREE.Vector3(0, 1, 0), view.spin);
+  _q.multiply(_qs);
+  // M = T(PIVOT + lift) · R · T(-PIVOT)
+  frame.M.makeRotationFromQuaternion(_q);
+  _v.copy(PIVOT).applyMatrix4(frame.M);
+  frame.M.setPosition(PIVOT.x - _v.x, PIVOT.y - _v.y + pose.lift, PIVOT.z - _v.z);
+  frame.inv.copy(frame.M).invert();
+  frame.R.setFromMatrix4(frame.M);
+  const e = frame.R.elements; // 列優先。転置をかける = 行ベクトルとして読む
+  frame.up = [e[1], e[4], e[7]];
+  frame.down = [-e[1], -e[4], -e[7]];
+
+  // 液面は、液の体積が変わらない水平な面。向きか量が変わったときだけ解き直す。
+  const key = `${frame.up.map((x) => x.toFixed(4)).join()}|${st.volume.toFixed(0)}`;
+  if (key !== planeKey) {
+    planeKey = key;
+    frame.liqD = liquidPlane(frame.up, st.volume);
+  }
+}
+
+// 傾けたときに床へめり込まない持ち上げ量。
+function neededLift(tilt) {
+  const s = Math.abs(Math.sin(tilt));
+  const c = Math.cos(tilt);
+  let lowest = Infinity;
+  for (const [r, y] of OUTLINE) lowest = Math.min(lowest, PIVOT.y - r * s + (y - PIVOT.y) * c);
+  return Math.max(0, -lowest);
+}
+
 function simulate(dt) {
   st.time += dt;
 
@@ -187,54 +272,111 @@ function simulate(dt) {
   }
 
   // 玉押しは目標の押し込みへ素早く追いつくバネ。
-  const k = 900;
-  const c = 2 * Math.sqrt(k);
-  const before = st.push;
-  st.pushV += (k * (st.pushTarget - st.push) - c * st.pushV) * dt;
-  st.push = Math.min(Math.max(st.push + st.pushV * dt, 0), CAP.maxPush);
-  if (before < 0.3 && st.push >= 0.3) sound.click();
+  {
+    const k = 900;
+    const c = 2 * Math.sqrt(k);
+    const before = st.push;
+    st.pushV += (k * (st.pushTarget - st.push) - c * st.pushV) * dt;
+    st.push = Math.min(Math.max(st.push + st.pushV * dt, 0), CAP.maxPush);
+    if (before < 0.3 && st.push >= 0.3) sound.click();
+  }
 
-  if (!st.open) {
-    // 開ける前のビー玉は玉押しといっしょに少し沈む（ゴムがつぶれる）。
-    st.marbleY = MARBLE_STOPS.seal - st.push;
-    if (st.push >= POP_AT) pop();
-  } else if (st.marbleFalling) {
-    st.marbleV -= GRAVITY * dt;
-    st.marbleY += st.marbleV * dt;
-    if (st.marbleY <= MARBLE_STOPS.rest) {
-      st.marbleY = MARBLE_STOPS.rest;
-      if (st.marbleV < -60) sound.clink(Math.min(1, -st.marbleV / 800));
-      st.marbleV = -st.marbleV * BOUNCE;
-      if (st.marbleV < 40) {
-        st.marbleV = 0;
-        st.marbleFalling = false;
+  // 傾き：つかむ／キー／センサーで目標を決め、少し揺れながら追いつく。
+  let goal = 0;
+  let holding = false;
+  if (pointer.mode === 'tilt') {
+    goal = pose.tiltGoal;
+    holding = true;
+  } else if (pose.keys.left !== pose.keys.right) {
+    goal = pose.keys.right ? TILT_KEY : -TILT_KEY;
+    holding = true;
+  } else if (pose.sensor !== null && Math.abs(pose.sensor) > 0.05) {
+    goal = pose.sensor;
+    holding = true;
+  }
+  pose.tiltGoal = goal;
+  pose.heldGoal = holding ? 1 : 0;
+  {
+    const k = 55;
+    const c = 2 * Math.sqrt(k) * (holding ? 1 : 0.55);
+    pose.tiltV += (k * (goal - pose.tilt) - c * pose.tiltV) * dt;
+    pose.tilt += pose.tiltV * dt;
+  }
+  pose.held += (pose.heldGoal - pose.held) * (1 - Math.exp(-dt * 10));
+  {
+    // 持ち上げ量は、床にめり込まない高さへ素早く、置くときはストンと。
+    const want = neededLift(pose.tilt) + HOLD_LIFT * pose.held;
+    const before = pose.liftV;
+    if (want >= pose.lift) {
+      pose.lift = want;
+      pose.liftV = 0;
+    } else {
+      pose.liftV -= 9810 * dt * 0.25;
+      pose.lift = Math.max(want, pose.lift + pose.liftV * dt);
+      if (pose.lift <= want + 1e-3) {
+        if (pose.lift < 0.5 && before < -30) sound.thunk();
+        pose.liftV = 0;
       }
     }
   }
-  // 玉押しより上にビー玉は行けない。
-  st.marbleY = Math.min(st.marbleY, CAP.restY - st.push - MARBLE_R);
 
-  if (st.open) st.level = LEVEL - SPILL * (1 - Math.exp(-fizz.since / 1.3));
+  updateFrame();
 
-  fizz.step(dt, { level: st.level, marble: { x: 0, y: st.marbleY, z: 0, r: MARBLE_R } });
+  if (!st.open) {
+    // 開ける前のビー玉は、ガス圧で口に押し付けられ、玉押しといっしょに少し沈むだけ。
+    marble.hold(MARBLE_STOPS.seal - st.push);
+    if (st.push >= POP_AT) pop();
+  }
+  const up = frame.up;
+  const d = frame.liqD;
+  const impact = marble.step(dt, frame.down, {
+    inLiquid: (p) => p[0] * up[0] + p[1] * up[1] + p[2] * up[2] < d,
+    pusherY: CAP.restY - st.push,
+  });
+  if (impact > 50) {
+    // 細かな当たりが続くときは鳴らしすぎない。
+    const v = Math.min(1, impact / 800);
+    if (st.time - st.lastClink > 0.05 || v > 0.5) {
+      sound.clink(v);
+      st.lastClink = st.time;
+    }
+  }
+
+  if (st.open) st.volume = LIQUID_VOLUME - SPILL * (1 - Math.exp(-fizz.since / 1.3));
+
+  fizz.step(dt, { up, liqD: d, level: levelOnAxis() });
 
   view.idle += dt;
   if (turning() && pointer.mode !== 'orbit') view.spinGoal += (dt / TURN_PERIOD) * Math.PI * 2;
   const ease = 1 - Math.exp(-dt * 8);
   view.spin += (view.spinGoal - view.spin) * ease;
   view.pitch += (view.pitchGoal - view.pitch) * ease;
+  view.look.lerp(lookGoal(_v), 1 - Math.exp(-dt * 4));
+}
+
+// 傾けた瓶が画面からはみ出さないよう、カメラはゆっくり瓶の真ん中を追う。
+function lookGoal(out) {
+  out.copy(CENTER).applyMatrix4(frame.M);
+  out.y = TARGET.y + (out.y - TARGET.y) * 0.8;
+  return out;
 }
 
 function isMoving() {
   return (
     turning() ||
     pointer.mode === 'orbit' ||
+    pointer.mode === 'tilt' ||
     Math.abs(view.spin - view.spinGoal) > 1e-4 ||
     Math.abs(view.pitch - view.pitchGoal) > 1e-4 ||
+    view.look.distanceTo(lookGoal(_look)) > 0.05 ||
+    Math.abs(pose.tilt - pose.tiltGoal) > 1e-4 ||
+    Math.abs(pose.tiltV) > 1e-3 ||
+    Math.abs(pose.held - pose.heldGoal) > 1e-3 ||
+    pose.liftV !== 0 ||
     st.auto >= 0 ||
     Math.abs(st.push - st.pushTarget) > 1e-3 ||
     Math.abs(st.pushV) > 1e-2 ||
-    st.marbleFalling ||
+    marble.moving ||
     fizz.active()
   );
 }
@@ -246,12 +388,9 @@ let scale = 0.6;
 
 function cameraFrame() {
   const cp = Math.cos(view.pitch);
-  const pos = new THREE.Vector3(
-    TARGET.x,
-    TARGET.y + DIST * Math.sin(view.pitch),
-    TARGET.z + DIST * cp,
-  );
-  const fwd = TARGET.clone().sub(pos).normalize();
+  const at = view.look;
+  const pos = new THREE.Vector3(at.x, at.y + DIST * Math.sin(view.pitch), at.z + DIST * cp);
+  const fwd = at.clone().sub(pos).normalize();
   const right = new THREE.Vector3().crossVectors(fwd, new THREE.Vector3(0, 1, 0)).normalize();
   const up = new THREE.Vector3().crossVectors(right, fwd);
   const aspect = size.w / size.h;
@@ -260,6 +399,7 @@ function cameraFrame() {
 }
 
 function updateUniforms() {
+  updateFrame(); // リセット直後など、シミュレーションを挟まずに描くときも姿勢と液面をそろえる
   const cam = cameraFrame();
   uniforms.uCamPos.value.copy(cam.pos);
   uniforms.uCamBasis.value.set(
@@ -268,13 +408,22 @@ function updateUniforms() {
     cam.right.z, cam.up.z, cam.fwd.z,
   );
   uniforms.uTanHalf.value = cam.tanHalf;
-  uniforms.uMarble.value.set(0, st.marbleY, 0, MARBLE_R);
-  uniforms.uLevel.value = st.level;
+
+  uniforms.uRot.value.copy(frame.R);
+  uniforms.uOrigin.value.setFromMatrixPosition(frame.M);
+  uniforms.uLightL.value.copy(LIGHT).applyMatrix3(frame.R.clone().transpose());
+  uniforms.uLiq.value.set(frame.up[0], frame.up[1], frame.up[2], frame.liqD);
+  uniforms.uContact.value = Math.exp(-pose.lift / 3);
+
+  const m = marble.pos;
+  uniforms.uMarble.value.set(m[0], m[1], m[2], MARBLE_R);
   uniforms.uPushY.value = CAP.restY - st.push;
-  uniforms.uRipple.value = Math.min(fizz.pressure * 1.6, 1) + (fizz.bubbles.length ? 0.08 : 0);
+  uniforms.uRipple.value = Math.min(fizz.pressure * 1.6, 1) + (fizz.bubbles.length ? 0.08 : 0) + Math.min(Math.abs(pose.tiltV) * 0.15, 0.6);
   uniforms.uTime.value = st.time;
-  uniforms.uSpin.value.set(Math.cos(view.spin), Math.sin(view.spin));
-  uniforms.uColumn.value.fromArray(fizz.column(st.level));
+  // 首の泡の層は、瓶がほぼ立っているときだけ。
+  const col = fizz.column(levelOnAxis());
+  if (frame.up[1] < 0.9) col[2] = 0;
+  uniforms.uColumn.value.fromArray(col);
   uniforms.uHaze.value = fizz.haze();
 
   const bub = uniforms.uBub.value;
@@ -290,8 +439,8 @@ function updateUniforms() {
     // w には 半径×100 の整数部と、泡らしさの小数部を詰める。
     foam[n++].set(b.x, b.y, b.z, Math.floor(b.r * 100) + Math.min(Math.max(b.f, 0), 0.99));
     const pad = b.r + 3;
-    lo.min(new THREE.Vector3(b.x - pad, b.y - pad, b.z - pad));
-    hi.max(new THREE.Vector3(b.x + pad, b.y + pad, b.z + pad));
+    lo.min(_v.set(b.x - pad, b.y - pad, b.z - pad));
+    hi.max(_v.set(b.x + pad, b.y + pad, b.z + pad));
   }
   uniforms.uFoamN.value = n;
   if (!n) {
@@ -300,6 +449,9 @@ function updateUniforms() {
   }
   return cam;
 }
+
+// シェーダーのキーライトと同じ向き（床の影もこの向きに落ちる）。
+const LIGHT = new THREE.Vector3(Math.sin(-0.85) * Math.cos(0.75), Math.sin(0.75), Math.cos(-0.85) * Math.cos(0.75));
 
 function resize() {
   size.ratio = Math.min(window.devicePixelRatio || 1, 2);
@@ -360,7 +512,7 @@ function tick(now) {
     acc -= STEP;
   }
 
-  updateFizzSound();
+  updateLoopSound();
 
   if (isMoving()) {
     // 重いときは解像度を下げ、余裕があれば戻す。
@@ -373,22 +525,37 @@ function tick(now) {
     raf = requestAnimationFrame(tick);
   } else if (!stillDrawn) {
     // 止まったら、いちばんきれいな 1 枚を描いて休む。
+    sound.setRoll(0);
     render(1);
     stillDrawn = true;
   }
 }
 
-function updateFizzSound() {
+function updateLoopSound() {
   const overflow = Math.min(1, fizz.foam.filter((b) => b.f > 0.5).length / 24);
   // ポンとカランを聞かせてから、シュワシュワを立ち上げる。
   const onset = Math.min(Math.max((fizz.since - 0.12) / 0.3, 0), 1);
   sound.setFizz(fizz.pressure * onset, fizz.trail * Math.min(1, fizz.bubbles.length / 24), overflow);
+  sound.setRoll(marble.rolling);
 }
 
 // ---------------------------------------------------------------- 入力
 
-// キャップのあたりを押したかどうか（画面上の位置で判定）。
+function pointerRay(px, py) {
+  const cam = cameraFrame();
+  const ndcX = (px / window.innerWidth) * 2 - 1;
+  const ndcY = 1 - (py / window.innerHeight) * 2;
+  const dir = cam.fwd
+    .clone()
+    .addScaledVector(cam.right, ndcX * cam.tanHalf * cam.aspect)
+    .addScaledVector(cam.up, ndcY * cam.tanHalf)
+    .normalize();
+  return { cam, dir };
+}
+
+// キャップのあたりを押したかどうか（画面上の位置で判定。瓶が立っているときだけ）。
 function overCap(px, py) {
+  if (Math.abs(pose.tilt) > 0.05 || pose.held > 0.05) return false;
   const cam = cameraFrame();
   const project = (x, y, z) => {
     const v = new THREE.Vector3(x, y, z).sub(cam.pos);
@@ -404,9 +571,34 @@ function overCap(px, py) {
   return Math.abs(ndcX - cx) < half && ndcY < top && ndcY > bottom;
 }
 
+// 瓶そのもの（キャップを含む）を指しているか。瓶のローカル座標で距離場をたどる。
+function overBottle(px, py) {
+  const { cam, dir } = pointerRay(px, py);
+  const o = cam.pos.clone().applyMatrix4(frame.inv);
+  const d = dir.clone().applyMatrix3(frame.R.clone().transpose());
+  const top = CAP.restY + CAP.stemH + CAP.buttonH;
+  let t = 0;
+  for (let i = 0; i < 160 && t < 1400; i++) {
+    const x = o.x + d.x * t;
+    const y = o.y + d.y * t;
+    const z = o.z + d.z * t;
+    const r = Math.hypot(x, z);
+    const cap = Math.max(r - CAP.collarRo, LIP_Y - 8 - y, y - top);
+    const dist = Math.min(sdBottle(x, y, z)[0], cap);
+    if (dist < 2) return true;
+    t += Math.max(dist * 0.9, 0.5);
+  }
+  return false;
+}
+
 function pxPerMm() {
   const cam = cameraFrame();
   return window.innerHeight / 2 / (cam.tanHalf * DIST);
+}
+
+function cursorFor(x, y) {
+  if (overCap(x, y)) return 'pointer';
+  return 'grab';
 }
 
 canvas.addEventListener('pointerdown', (e) => {
@@ -419,6 +611,11 @@ canvas.addEventListener('pointerdown', (e) => {
   if (overCap(e.clientX, e.clientY) && st.auto < 0) {
     pointer.mode = 'press';
     pointer.startPush = st.pushTarget;
+  } else if (overBottle(e.clientX, e.clientY)) {
+    pointer.mode = 'tilt';
+    pointer.startTilt = pose.tilt;
+    pose.tiltGoal = pose.tilt;
+    canvas.style.cursor = 'grabbing';
   } else {
     pointer.mode = 'orbit';
   }
@@ -427,7 +624,7 @@ canvas.addEventListener('pointerdown', (e) => {
 
 canvas.addEventListener('pointermove', (e) => {
   if (!pointer.down) {
-    canvas.style.cursor = overCap(e.clientX, e.clientY) ? 'pointer' : 'grab';
+    canvas.style.cursor = cursorFor(e.clientX, e.clientY);
     return;
   }
   const dx = e.clientX - pointer.x;
@@ -438,6 +635,9 @@ canvas.addEventListener('pointermove', (e) => {
   if (pointer.mode === 'press') {
     const down = ((e.clientY - pointer.startY) / pxPerMm()) * PRESS_RATIO;
     st.pushTarget = Math.min(Math.max(pointer.startPush + down, 0), CAP.maxPush);
+  } else if (pointer.mode === 'tilt') {
+    const goal = pointer.startTilt + (e.clientX - pointer.startX) * TILT_PER_PX;
+    pose.tiltGoal = Math.min(Math.max(goal, -TILT_MAX), TILT_MAX);
   } else if (pointer.mode === 'orbit') {
     canvas.style.cursor = 'grabbing';
     view.spinGoal += dx * 0.01;
@@ -454,13 +654,20 @@ function endPointer(e) {
     else st.pushTarget = 0;
   }
   pointer.mode = null;
-  canvas.style.cursor = overCap(e.clientX, e.clientY) ? 'pointer' : 'grab';
+  canvas.style.cursor = cursorFor(e.clientX, e.clientY);
   wake();
 }
 canvas.addEventListener('pointerup', endPointer);
 canvas.addEventListener('pointercancel', endPointer);
 
 window.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+    pose.keys[e.key === 'ArrowLeft' ? 'left' : 'right'] = true;
+    e.preventDefault();
+    sound.unlock();
+    wake();
+    return;
+  }
   if (e.repeat) return;
   sound.unlock();
   if (e.key === 'p' || e.key === 'P' || e.key === 'Enter') startAutoPress();
@@ -470,6 +677,18 @@ window.addEventListener('keydown', (e) => {
     view.drift = !view.drift;
     e.preventDefault();
   } else return;
+  wake();
+});
+
+window.addEventListener('keyup', (e) => {
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+    pose.keys[e.key === 'ArrowLeft' ? 'left' : 'right'] = false;
+    wake();
+  }
+});
+
+window.addEventListener('blur', () => {
+  pose.keys.left = pose.keys.right = false;
   wake();
 });
 
@@ -492,6 +711,48 @@ function updateMuteButton() {
   muteButton.setAttribute('aria-pressed', String(sound.muted));
   muteButton.setAttribute('aria-label', sound.muted ? '音を出す' : '音を消す');
   muteButton.dataset.muted = String(sound.muted);
+}
+
+// ---------------------------------------------------------------- 傾きセンサー（スマホ）
+
+// スマホを左右に傾けると、瓶も同じだけ傾く。
+function onOrientation(e) {
+  if (e.gamma === null) return;
+  const angle = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
+  let deg = e.gamma;
+  if (angle === 90) deg = e.beta;
+  else if (angle === -90 || angle === 270) deg = -e.beta;
+  pose.sensor = Math.min(Math.max(THREE.MathUtils.degToRad(deg) * 1.2, -TILT_MAX), TILT_MAX);
+  wake();
+}
+
+async function toggleSensor() {
+  if (pose.sensor !== null) {
+    window.removeEventListener('deviceorientation', onOrientation);
+    pose.sensor = null;
+  } else {
+    // iPhone は、タップの中で許可をもらう必要がある。
+    const DOE = window.DeviceOrientationEvent;
+    if (DOE && typeof DOE.requestPermission === 'function') {
+      try {
+        if ((await DOE.requestPermission()) !== 'granted') return;
+      } catch {
+        return;
+      }
+    }
+    pose.sensor = 0;
+    window.addEventListener('deviceorientation', onOrientation);
+  }
+  tiltButton.setAttribute('aria-pressed', String(pose.sensor !== null));
+  wake();
+}
+
+if ('DeviceOrientationEvent' in window && matchMedia('(hover: none)').matches) {
+  tiltButton.hidden = false;
+  tiltButton.addEventListener('click', () => {
+    sound.unlock();
+    toggleSensor();
+  });
 }
 
 // 裏のタブに回ったら音を止める（描画も止まるので、シュワシュワが鳴りっぱなしにならないように）。
@@ -518,6 +779,15 @@ window.__ramune = {
   release() {
     st.pushTarget = 0;
   },
+  // 瓶を持って傾ける（deg）。null で手を離す。
+  tilt(deg) {
+    pose.keys.left = pose.keys.right = false;
+    if (deg === null) {
+      pose.sensor = null;
+    } else {
+      pose.sensor = THREE.MathUtils.degToRad(deg);
+    }
+  },
   advance(sec) {
     const n = Math.round(sec / STEP);
     for (let i = 0; i < n; i++) simulate(STEP);
@@ -531,11 +801,15 @@ window.__ramune = {
     render(s);
     renderer.getContext().finish();
   },
+  overBottle,
   state: () => ({
     open: st.open,
     push: +st.push.toFixed(3),
-    marbleY: +st.marbleY.toFixed(2),
-    level: +st.level.toFixed(2),
+    marble: marble.pos.map((x) => +x.toFixed(2)),
+    tilt: +THREE.MathUtils.radToDeg(pose.tilt).toFixed(1),
+    lift: +pose.lift.toFixed(2),
+    liqD: +frame.liqD.toFixed(2),
+    volumeMl: +(st.volume / 1000).toFixed(2),
     pressure: +fizz.pressure.toFixed(3),
     bubbles: fizz.bubbles.length,
     foam: fizz.foam.length,
@@ -543,6 +817,7 @@ window.__ramune = {
   }),
 };
 
+updateFrame();
 updateHint();
 updateMuteButton();
 resize();

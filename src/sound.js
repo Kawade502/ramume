@@ -3,6 +3,7 @@
 //   カラン    ビー玉が凹みに当たって跳ねるたび。ガラスの澄んだ倍音
 //   シュワ    液の中で泡がはじける細かいパチパチと、吹き出す瞬間のシャー
 //   ブクブク  キャップからあふれる泡
+//   コロコロ  ビー玉が瓶の内側を転がっている間
 //   カチッ    玉押しを押し始めたとき
 //   コトッ    新しい瓶を置いたとき
 
@@ -134,12 +135,17 @@ export function createVoices(ctx, out) {
   const hiss = layer(noise, 1, 'highpass', 4200);
   const crack = layer(crackle, 1, 'highpass', 1500);
   const gurgle = layer(crackle, 0.4, 'lowpass', 1100);
+  // 転がる音：ガラスどうしがこすれる細かなコツコツと、低いゴロゴロ。
+  const rollTick = layer(crackle, 0.3, 'bandpass', 1500);
+  const rollRumble = layer(noise, 1, 'lowpass', 260);
 
   const fizz = {
     start(t) {
       hiss.src.start(t);
       crack.src.start(t, 1.3);
       gurgle.src.start(t, 2.6);
+      rollTick.src.start(t, 0.7);
+      rollRumble.src.start(t, 0.4);
     },
     // pressure: 吹き出しの勢い, trail: 残ったシュワシュワ, overflow: あふれる泡の量（どれも 0〜1）
     set(pressure, trail, overflow, t) {
@@ -149,7 +155,17 @@ export function createVoices(ctx, out) {
     },
   };
 
-  return { pop, clink, click, thunk, fizz };
+  // speed: ビー玉が転がる速さ (mm/s)
+  const roll = {
+    set(speed, t) {
+      const a = Math.min(1, speed / 260);
+      rollTick.g.gain.setTargetAtTime(0.45 * a, t, 0.05);
+      rollTick.src.playbackRate.setTargetAtTime(0.2 + 0.35 * a, t, 0.05);
+      rollRumble.g.gain.setTargetAtTime(0.18 * a, t, 0.05);
+    },
+  };
+
+  return { pop, clink, click, thunk, fizz, roll };
 }
 
 const MUTE_KEY = 'ramune:muted';
@@ -199,6 +215,9 @@ export function createSound() {
     },
     setFizz(pressure, trail, overflow) {
       if (ready()) voices.fizz.set(pressure, trail, overflow, ctx.currentTime);
+    },
+    setRoll(speed) {
+      if (ready()) voices.roll.set(speed, ctx.currentTime);
     },
     pause() {
       if (ctx && ctx.state === 'running') ctx.suspend();

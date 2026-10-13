@@ -39,7 +39,8 @@ body {
   pointer-events: none;
 }
 
-.mute {
+.mute,
+.tilt {
   position: fixed;
   top: max(10px, env(safe-area-inset-top));
   right: 12px;
@@ -55,16 +56,37 @@ body {
   cursor: pointer;
 }
 
-.mute:hover {
+.tilt {
+  right: 60px;
+}
+
+.tilt[hidden] {
+  display: none;
+}
+
+.tilt[aria-pressed='true'] {
+  color: #fff;
+  background: #1d5fd8;
+  border-color: #1d5fd8;
+}
+
+.mute:hover,
+.tilt:hover {
   background: #ffffffcc;
 }
 
-.mute:focus-visible {
+.tilt[aria-pressed='true']:hover {
+  background: #2f72e8;
+}
+
+.mute:focus-visible,
+.tilt:focus-visible {
   outline: 2px solid #1d5fd8;
   outline-offset: 2px;
 }
 
-.mute svg {
+.mute svg,
+.tilt svg {
   width: 22px;
   height: 22px;
   fill: none;

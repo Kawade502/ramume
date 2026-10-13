@@ -16,11 +16,17 @@
         <path class="cross" d="M16 9l6 6M22 9l-6 6" />
       </svg>
     </button>
+    <button type="button" class="tilt" id="tilt" aria-pressed="false" aria-label="スマホの傾きで瓶を傾ける" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="8" y="3" width="8" height="15" rx="1.8" transform="rotate(18 12 12)" />
+        <path d="M4 18c2.5 2.6 6.5 3.4 10 2" />
+      </svg>
+    </button>
     <div class="hint" id="hint" data-state="sealed">
       <p class="sealed">キャップを押し下げて、ビー玉を落とそう</p>
-      <p class="open">シュワッ。<button type="button" id="again">新しい瓶</button></p>
-      <p class="sub keys">ドラッグで回す ・ <kbd>P</kbd> 開ける ・ <kbd>R</kbd> 新しい瓶 ・ <kbd>Space</kbd> 回転 ・ <kbd>M</kbd> 音</p>
-      <p class="sub touch">キャップをタップしても開くよ ・ ドラッグで回す</p>
+      <p class="open">瓶をつかんで傾けると、ビー玉が転がるよ<button type="button" id="again">新しい瓶</button></p>
+      <p class="sub keys">瓶をドラッグ・<kbd>←</kbd><kbd>→</kbd> で傾ける ・ まわりをドラッグで回す ・ <kbd>P</kbd> 開ける ・ <kbd>R</kbd> 新しい瓶 ・ <kbd>M</kbd> 音</p>
+      <p class="sub touch">瓶を左右にドラッグで傾ける ・ キャップをタップでも開くよ</p>
     </div>
     <p class="error" id="error" hidden>この端末では WebGL2 が使えないため表示できません。</p>
     <script type="module" src="./src/main.js"></script>

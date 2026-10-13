@@ -79,9 +79,13 @@ export function createFizz() {
     }
   }
 
-  function spawnBubble(level, P) {
-    if (sites.length && rand() < 0.7) {
-      const s = sites[Math.floor(rand() * sites.length)];
+  // 液の中にあるか（瓶を傾けると液面も傾く）。
+  const below = (x, y, z, ctx, margin) => x * ctx.up[0] + y * ctx.up[1] + z * ctx.up[2] < ctx.liqD - margin;
+
+  function spawnBubble(ctx, P) {
+    const level = ctx.level;
+    const s = sites.length && rand() < 0.7 ? sites[Math.floor(rand() * sites.length)] : null;
+    if (s && below(s.x, s.y, s.z, ctx, 1)) {
       return {
         x: s.x + (rand() - 0.5) * 0.3,
         y: s.y,
@@ -102,7 +106,8 @@ export function createFizz() {
       y = 10 + rand() * Math.max(level - 16, 1);
       rr = Math.sqrt(rand()) * (innerR(y) - r0 - 0.4);
     }
-    return { x: Math.cos(th) * rr, y, z: Math.sin(th) * rr, r: r0, ph: rand() * 6.28, wob: 3 };
+    const b = { x: Math.cos(th) * rr, y, z: Math.sin(th) * rr, r: r0, ph: rand() * 6.28, wob: 3 };
+    return below(b.x, b.y, b.z, ctx, 1) ? b : null;
   }
 
   // 玉押しのつばの下からあふれ出す泡。
@@ -134,18 +139,24 @@ export function createFizz() {
     }
     const P = pressure;
     const fizz = since >= 0 ? Math.exp(-since / 10) : 0;
-    const level = ctx.level;
+    const up = ctx.up;
 
     // 液の中の泡：生まれた場所から、ふくらみながら上って液面で消える。
     bubAcc += dt * (300 * P + 26 * fizz);
     while (bubAcc >= 1) {
       bubAcc -= 1;
-      if (bubbles.length < MAX_BUB) bubbles.push(spawnBubble(level, P));
+      if (bubbles.length >= MAX_BUB) continue;
+      const b = spawnBubble(ctx, P);
+      if (b) bubbles.push(b);
     }
     for (let i = bubbles.length - 1; i >= 0; i--) {
       const b = bubbles[i];
       b.r = Math.min(b.r + dt * (0.25 + 1.0 * P), 2.0);
-      b.y += (14 + 36 * b.r + 80 * P) * dt;
+      // 浮力で、世界の上向きへ上る。
+      const rise = (14 + 36 * b.r + 80 * P) * dt;
+      b.x += up[0] * rise;
+      b.y += up[1] * rise;
+      b.z += up[2] * rise;
       b.ph += dt * 7;
       b.x += Math.cos(b.ph) * dt * b.wob;
       b.z += Math.sin(b.ph * 1.3) * dt * b.wob;
@@ -155,7 +166,7 @@ export function createFizz() {
         b.x *= lim / rr;
         b.z *= lim / rr;
       }
-      if (b.y + b.r > level - 0.15) bubbles.splice(i, 1);
+      if (!below(b.x, b.y, b.z, ctx, b.r + 0.15) || b.y < 8) bubbles.splice(i, 1);
     }
 
     // 首を満たした泡があふれている間、つばの下から泡を出す。

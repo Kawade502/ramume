@@ -46,7 +46,6 @@ uniform mat3 uCamBasis;
 uniform float uTanHalf;
 uniform sampler2D uProf;
 uniform vec4 uMarble;
-uniform float uLevel;
 uniform float uPushY;
 uniform vec4 uBub[${MAX_BUB}];
 uniform int uBubN;
@@ -57,7 +56,12 @@ uniform vec3 uFoamHi;
 uniform float uRipple;
 uniform float uHaze;
 uniform float uTime;
-uniform vec2 uSpin;
+// 瓶のローカル座標 → 世界座標：world = uRot * local + uOrigin
+uniform mat3 uRot;
+uniform vec3 uOrigin;
+uniform vec3 uLightL; // キーライトの向き（ローカル座標）
+uniform vec4 uLiq; // 液面 dot(p, uLiq.xyz) = uLiq.w（ローカル座標、xyz は世界の上向き）
+uniform float uContact; // 瓶の底が床に着いているほど 1
 uniform vec3 uColumn;
 
 out vec4 fragColor;
@@ -139,12 +143,12 @@ float smin(float a, float b, float k) {
 // x: ガラスまでの距離, y: 瓶の内部空間までの距離（どちらも負なら内側）。
 vec2 sdBottle(vec3 p) {
   float r = length(p.xz);
-  float c = r > 1e-4 ? (p.x * uSpin.x + p.z * uSpin.y) / r : 0.0;
+  float c = r > 1e-4 ? p.x / r : 0.0;
   float c2 = c * c;
   float c4 = c2 * c2;
   float c8 = c4 * c4;
   float dy = (p.y - DIMPLE_Y) / DIMPLE_W;
-  r += DIMPLE_D * exp(-dy * dy) * c8 * c8;
+  r += DIMPLE_D * exp(-dy * dy) * c4;
   vec4 P = prof(p.y);
   float dOut = (r - P.x) * inversesqrt(1.0 + P.y * P.y);
   float dIn = (r - P.z) * inversesqrt(1.0 + P.w * P.w);
@@ -319,7 +323,7 @@ float softbox(vec3 rd, float az0, float el0, float aw, float eh, float soft) {
          (1.0 - smoothstep(eh - soft, eh + soft, abs(el - el0)));
 }
 
-vec3 sky(vec3 rd) {
+vec3 skyW(vec3 rd) {
   vec3 c = mix(HORIZON, ZENITH, smoothstep(0.0, 0.75, rd.y));
   c += vec3(1.0, 0.98, 0.95) * 7.0 * softbox(rd, ${f(KEY_AZ)}, ${f(KEY_EL)}, 0.2, 0.42, 0.04);
   c += vec3(0.95, 0.98, 1.0) * 2.6 * softbox(rd, 1.05, 0.55, 0.11, 0.38, 0.03);
@@ -331,6 +335,11 @@ vec3 sky(vec3 rd) {
   return c;
 }
 
+// 瓶のローカル座標の向きで空を引く。
+vec3 sky(vec3 rdL) {
+  return skyW(uRot * rdL);
+}
+
 // 矩形波を幅 fw でぼかした値（遠くのチェックがちらつかないように）。
 float stripe(float u, float fw) {
   float a = u - fw * 0.5;
@@ -340,9 +349,35 @@ float stripe(float u, float fw) {
   return (ib - ia) / fw;
 }
 
-// 床の点 fp から光源へ向かう線が、瓶の軸から何倍の半径のところを通るか。
-float shadowRatio(vec2 a, vec2 b, float y) {
-  return length(a + b * y) / prof(y).x;
+// 光線 o + d*s が、瓶の軸から外径の何倍のところを通るか（瓶のローカル座標）。
+float shadowRatio(vec3 o, vec3 d, float s) {
+  vec3 q = o + d * s;
+  if (q.y < 0.0 || q.y > LIP_Y + 2.0) return 1e3;
+  return length(q.xz) / prof(q.y).x;
+}
+
+// 円柱 r < R, y0 < y < y1 に光線が入って出る距離。
+vec2 cylHit(vec3 ro, vec3 rd, float R, float y0, float y1) {
+  float a = dot(rd.xz, rd.xz);
+  float b = dot(ro.xz, rd.xz);
+  float c = dot(ro.xz, ro.xz) - R * R;
+  vec2 t = vec2(-1e5, 1e5);
+  if (a > 1e-8) {
+    float h = b * b - a * c;
+    if (h < 0.0) return vec2(1.0, -1.0);
+    h = sqrt(h);
+    t = vec2(-b - h, -b + h) / a;
+  } else if (c > 0.0) {
+    return vec2(1.0, -1.0);
+  }
+  if (abs(rd.y) > 1e-6) {
+    vec2 ty = vec2((y0 - ro.y) / rd.y, (y1 - ro.y) / rd.y);
+    if (ty.x > ty.y) ty = ty.yx;
+    t = vec2(max(t.x, ty.x), min(t.y, ty.y));
+  } else if (ro.y < y0 || ro.y > y1) {
+    return vec2(1.0, -1.0);
+  }
+  return t;
 }
 
 vec3 floorShade(vec3 fp) {
@@ -353,48 +388,57 @@ vec3 floorShade(vec3 fp) {
   float g = stripe(fp.x / CHECK, fw) + stripe(fp.z / CHECK + 0.25, fw);
   vec3 c = mix(FLOOR, GINGHAM, 0.24 * g * (1.0 - smoothstep(380.0, 1000.0, dist)));
 
+  // 瓶のローカル座標で、床の点から光源へ向かう線をたどり、瓶の輪郭にいちばん近づく所を探す。
+  vec3 o = (fp - uOrigin) * uRot;
+  vec3 L = uLightL;
   float sh = 0.0;
   float ca = 0.0;
-  if (dist < 460.0) {
-    // 光源へ向かう線をたどり、瓶の輪郭にいちばん近づく高さを探す。
-    vec2 a = fp.xz - LIGHT.xz * fp.y / LIGHT.y;
-    vec2 b = LIGHT.xz / LIGHT.y;
-    const float H = LIP_Y + 2.0;
+  vec2 ts = cylHit(o, L, 30.0, 0.0, LIP_Y + 2.0);
+  ts.x = max(ts.x, 0.0);
+  if (ts.y > ts.x) {
     const int N = 24;
+    float span = ts.y - ts.x;
     float best = 1e9;
-    float by = 0.0;
+    float bs = ts.x;
     for (int i = 0; i < N; i++) {
-      float y = (float(i) + 0.5) / float(N) * H;
-      float x = shadowRatio(a, b, y);
-      if (x < best) { best = x; by = y; }
+      float s = ts.x + (float(i) + 0.5) / float(N) * span;
+      float x = shadowRatio(o, L, s);
+      if (x < best) { best = x; bs = s; }
     }
-    float h = H / float(N) * 0.5;
+    float h = span / float(N) * 0.5;
     for (int i = 0; i < 4; i++) {
-      float y0 = clamp(by - h, 0.0, H);
-      float y1 = clamp(by + h, 0.0, H);
-      float x0 = shadowRatio(a, b, y0);
-      float x1 = shadowRatio(a, b, y1);
-      if (x0 < best) { best = x0; by = y0; }
-      if (x1 < best) { best = x1; by = y1; }
+      float s0 = clamp(bs - h, ts.x, ts.y);
+      float s1 = clamp(bs + h, ts.x, ts.y);
+      float x0 = shadowRatio(o, L, s0);
+      float x1 = shadowRatio(o, L, s1);
+      if (x0 < best) { best = x0; bs = s0; }
+      if (x1 < best) { best = x1; bs = s1; }
       h *= 0.5;
     }
-    float soft = 0.05 + by * 0.0009;
+    vec3 q = o + L * bs;
+    float soft = 0.05 + bs * 0.0007;
     float inside = 1.0 - smoothstep(1.0 - soft, 1.0 + soft, best);
     sh = inside * mix(0.4, 0.85, smoothstep(0.45, 1.0, best));
-    ca = inside * exp(-best * best * 11.0) * (by < uLevel ? 1.0 : 0.35);
+    ca = inside * exp(-best * best * 11.0) * (dot(q, uLiq.xyz) < uLiq.w ? 1.0 : 0.35);
   }
   c *= mix(vec3(1.0), SHADOW_TINT, sh) * (1.0 - 0.4 * sh);
   c += CAUSTIC * ca * 0.85;
-  c *= 1.0 - 0.5 * exp(-max(dist - 25.0, 0.0) / 4.5);
+  // 底が床に着いているところの陰り。
+  c *= 1.0 - 0.5 * uContact * exp(-max(length(o.xz) - 25.0, 0.0) / 4.5) * exp(-abs(o.y) / 3.0);
   return mix(c, HORIZON, smoothstep(500.0, 2600.0, dist));
 }
 
-vec3 background(vec3 ro, vec3 rd) {
+vec3 backgroundW(vec3 ro, vec3 rd) {
   if (rd.y < -1e-4) {
     float t = max(-ro.y / rd.y, 0.0);
     return floorShade(ro + rd * t);
   }
-  return sky(rd);
+  return skyW(rd);
+}
+
+// 瓶のローカル座標の点と向きから、背景（床か空）を引く。
+vec3 background(vec3 roL, vec3 rdL) {
+  return backgroundW(uRot * roL + uOrigin, uRot * rdL);
 }
 
 // ---------------------------------------------------------------- 光の受け渡し
@@ -469,7 +513,7 @@ void throughSphere(vec3 hp, vec3 c, float R, float nOut, float nIn, vec3 absorb,
 vec3 shadeCap(vec3 hp, vec3 rd, float part) {
   vec3 n = capNormal(hp);
   vec3 alb = part < 0.5 ? CAP_COLLAR : CAP_PUSHER;
-  float diff = max(dot(n, LIGHT), 0.0);
+  float diff = max(dot(n, uLightL), 0.0);
   vec3 amb = mix(FLOOR * 0.55, ZENITH * 0.9, n.y * 0.5 + 0.5);
   vec3 c = alb * (amb + diff * 1.4);
   float F = 0.04 + 0.96 * pow(1.0 - max(dot(-rd, n), 0.0), 5.0);
@@ -486,7 +530,7 @@ void shadeFoam(vec3 hp, vec3 rd, inout vec3 col, inout vec3 thru) {
   vec3 offT = off - n * dot(off, n);
   vec3 bn = normalize(n - offT * mix(0.6, 1.3, f));
   float wall = 1.0 - smoothstep(0.0, 0.16, v.y - v.x);
-  float wrap = dot(bn, LIGHT) * 0.5 + 0.5;
+  float wrap = dot(bn, uLightL) * 0.5 + 0.5;
   vec3 base = vec3(0.95, 0.97, 1.0) * (0.52 + 0.55 * wrap);
   base = mix(base * 0.84, vec3(1.02), wall * 0.7);
   base += vec3(0.55, 0.85, 0.95) * 0.06 * (1.0 - wrap);
@@ -563,7 +607,10 @@ vec2 boundHit(vec3 ro, vec3 rd) {
   return vec2(max(t.x, ty.x), min(t.y, ty.y));
 }
 
-vec3 trace(vec3 ro, vec3 rd) {
+vec3 trace(vec3 roW, vec3 rdW) {
+  // ここから先は瓶のローカル座標で考える。
+  vec3 ro = (roW - uOrigin) * uRot;
+  vec3 rd = rdW * uRot;
   vec2 tb = boundHit(ro, rd);
   if (tb.y <= max(tb.x, 0.0)) return background(ro, rd);
   vec3 p = ro + rd * max(tb.x, 0.0);
@@ -581,9 +628,12 @@ vec3 trace(vec3 ro, vec3 rd) {
     if (med != GLASS) {
       float tm = sphereHit(p, rd, uMarble.xyz, uMarble.w);
       if (tm > 0.0) { tA = tm; aKind = 1; }
-      if (abs(rd.y) > 1e-6) {
-        float tp = (uLevel - p.y) / rd.y;
-        if (tp > 1e-4 && tp < tA && (med == LIQ || sdBottle(p + rd * tp).y < 0.0)) { tA = tp; aKind = 2; }
+      float dn = dot(rd, uLiq.xyz);
+      if (abs(dn) > 1e-6) {
+        float tp = (uLiq.w - dot(p, uLiq.xyz)) / dn;
+        vec3 qp = p + rd * tp;
+        // 液面は瓶の中（口より下）だけ。口の上へ伸びる内部空間の続きには描かない。
+        if (tp > 1e-4 && tp < tA && (med == LIQ || (qp.y < LIP_Y && sdBottle(qp).y < 0.0))) { tA = tp; aKind = 2; }
       }
       if (med == LIQ) {
         for (int i = 0; i < ${MAX_BUB}; i++) {
@@ -648,7 +698,7 @@ vec3 trace(vec3 ro, vec3 rd) {
       int next = GLASS;
       if (med == GLASS) {
         vec3 probe = hp - N * 3.0 * EPS;
-        next = (sdBottle(probe).y < 0.0 && probe.y < uLevel) ? LIQ : AIR;
+        next = (sdBottle(probe).y < 0.0 && dot(probe, uLiq.xyz) < uLiq.w) ? LIQ : AIR;
       }
       if (crossSurface(hp, N, iorOf(med), iorOf(next), rd, p, col, thru)) med = next;
       gBlur += 9.0;
@@ -660,10 +710,16 @@ vec3 trace(vec3 ro, vec3 rd) {
       throughSphere(hp, uMarble.xyz, uMarble.w, iorOf(med), IOR_MARBLE, ABS_MARBLE, rd, p, col, thru);
       gBlur += 4.0;
     } else if (aKind == 2) {
-      vec3 n = vec3(0.0, 1.0, 0.0);
-      n.xz += uRipple * 0.12 * vec2(sin(hp.x * 0.9 + uTime * 9.0) + sin(hp.z * 1.7 - uTime * 6.0),
-                                     sin(hp.z * 0.8 - uTime * 7.0) + sin(hp.x * 1.5 + uTime * 5.0));
+      // 液面は水平（世界の上向き）。さざ波で少し揺らす。
+      vec3 n = uLiq.xyz;
+      vec3 t1 = normalize(cross(n, abs(n.z) < 0.9 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0)));
+      vec3 t2 = cross(n, t1);
+      n += uRipple * 0.12 * (t1 * (sin(hp.x * 0.9 + uTime * 9.0) + sin(hp.z * 1.7 - uTime * 6.0)) +
+                             t2 * (sin(hp.z * 0.8 - uTime * 7.0) + sin(hp.x * 1.5 + uTime * 5.0)));
       n = normalize(n);
+      // 液面がガラスに接するところは、少しせり上がって光る（メニスカス）。
+      float wall = -sdBottle(hp).y;
+      col += thru * exp(-max(wall, 0.0) / 0.8) * 0.55 * skyW(normalize(uRot * uLiq.xyz + vec3(0.0, 0.0, 0.4)));
       vec3 N = dot(rd, n) < 0.0 ? n : -n;
       int next = med == LIQ ? AIR : LIQ;
       if (crossSurface(hp, N, iorOf(med), iorOf(next), rd, p, col, thru)) med = next;
