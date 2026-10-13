@@ -39,6 +39,54 @@ body {
   pointer-events: none;
 }
 
+.mute {
+  position: fixed;
+  top: max(10px, env(safe-area-inset-top));
+  right: 12px;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  color: var(--ink);
+  background: #ffffff8c;
+  border: 1px solid #2a4a5a1f;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.mute:hover {
+  background: #ffffffcc;
+}
+
+.mute:focus-visible {
+  outline: 2px solid #1d5fd8;
+  outline-offset: 2px;
+}
+
+.mute svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.mute .speaker {
+  fill: currentColor;
+}
+
+.mute .cross,
+.mute[data-muted='true'] .waves {
+  display: none;
+}
+
+.mute[data-muted='true'] .cross {
+  display: inline;
+}
+
 .hint {
   position: fixed;
   left: 16px;

@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import './style.css';
 import { CAP, LEVEL, MARBLE_R, MARBLE_STOPS, SPILL, makeProfileTexture } from './bottle.js';
 import { createFizz } from './foam.js';
+import { createSound } from './sound.js';
 import { BLIT_FRAG, MAX_BUB, MAX_FOAM, TRACE_FRAG, VERT } from './shader.js';
 
 const TARGET = new THREE.Vector3(0, 93, 0);
@@ -34,6 +35,7 @@ const canvas = document.getElementById('stage');
 const hint = document.getElementById('hint');
 const errorBox = document.getElementById('error');
 const again = document.getElementById('again');
+const muteButton = document.getElementById('mute');
 
 let renderer;
 try {
@@ -65,6 +67,7 @@ const uniforms = {
   uFoamLo: { value: new THREE.Vector3(0, -1e4, 0) },
   uFoamHi: { value: new THREE.Vector3(0, -1e4, 0) },
   uRipple: { value: 0 },
+  uHaze: { value: 0 },
   uTime: { value: 0 },
   uSpin: { value: new THREE.Vector2(1, 0) },
   uColumn: { value: new THREE.Vector3() },
@@ -100,6 +103,7 @@ blitScene.add(new THREE.Mesh(quad, blitMat));
 // ---------------------------------------------------------------- 状態
 
 const fizz = createFizz();
+const sound = createSound();
 
 const st = {
   time: 0,
@@ -139,6 +143,8 @@ function reset() {
   st.level = LEVEL;
   st.auto = -1;
   fizz.reset();
+  sound.setFizz(0, 0, 0);
+  sound.thunk();
   updateHint();
   wake();
 }
@@ -147,7 +153,8 @@ function pop() {
   st.open = true;
   st.marbleFalling = true;
   st.marbleV = -180;
-  fizz.open();
+  fizz.open(st.level);
+  sound.pop(1);
   updateHint();
 }
 
@@ -182,8 +189,10 @@ function simulate(dt) {
   // 玉押しは目標の押し込みへ素早く追いつくバネ。
   const k = 900;
   const c = 2 * Math.sqrt(k);
+  const before = st.push;
   st.pushV += (k * (st.pushTarget - st.push) - c * st.pushV) * dt;
   st.push = Math.min(Math.max(st.push + st.pushV * dt, 0), CAP.maxPush);
+  if (before < 0.3 && st.push >= 0.3) sound.click();
 
   if (!st.open) {
     // 開ける前のビー玉は玉押しといっしょに少し沈む（ゴムがつぶれる）。
@@ -194,6 +203,7 @@ function simulate(dt) {
     st.marbleY += st.marbleV * dt;
     if (st.marbleY <= MARBLE_STOPS.rest) {
       st.marbleY = MARBLE_STOPS.rest;
+      if (st.marbleV < -60) sound.clink(Math.min(1, -st.marbleV / 800));
       st.marbleV = -st.marbleV * BOUNCE;
       if (st.marbleV < 40) {
         st.marbleV = 0;
@@ -265,6 +275,7 @@ function updateUniforms() {
   uniforms.uTime.value = st.time;
   uniforms.uSpin.value.set(Math.cos(view.spin), Math.sin(view.spin));
   uniforms.uColumn.value.fromArray(fizz.column(st.level));
+  uniforms.uHaze.value = fizz.haze();
 
   const bub = uniforms.uBub.value;
   fizz.bubbles.forEach((b, i) => bub[i].set(b.x, b.y, b.z, b.r));
@@ -276,7 +287,8 @@ function updateUniforms() {
   let n = 0;
   for (const b of fizz.foam) {
     if (b.r <= 0.05) continue;
-    foam[n++].set(b.x, b.y, b.z, b.r);
+    // w には 半径×100 の整数部と、泡らしさの小数部を詰める。
+    foam[n++].set(b.x, b.y, b.z, Math.floor(b.r * 100) + Math.min(Math.max(b.f, 0), 0.99));
     const pad = b.r + 3;
     lo.min(new THREE.Vector3(b.x - pad, b.y - pad, b.z - pad));
     hi.max(new THREE.Vector3(b.x + pad, b.y + pad, b.z + pad));
@@ -348,6 +360,8 @@ function tick(now) {
     acc -= STEP;
   }
 
+  updateFizzSound();
+
   if (isMoving()) {
     // 重いときは解像度を下げ、余裕があれば戻す。
     frameAvg += (dt - frameAvg) * 0.1;
@@ -362,6 +376,13 @@ function tick(now) {
     render(1);
     stillDrawn = true;
   }
+}
+
+function updateFizzSound() {
+  const overflow = Math.min(1, fizz.foam.filter((b) => b.f > 0.5).length / 24);
+  // ポンとカランを聞かせてから、シュワシュワを立ち上げる。
+  const onset = Math.min(Math.max((fizz.since - 0.12) / 0.3, 0), 1);
+  sound.setFizz(fizz.pressure * onset, fizz.trail * Math.min(1, fizz.bubbles.length / 24), overflow);
 }
 
 // ---------------------------------------------------------------- 入力
@@ -389,6 +410,7 @@ function pxPerMm() {
 }
 
 canvas.addEventListener('pointerdown', (e) => {
+  sound.unlock();
   canvas.setPointerCapture(e.pointerId);
   pointer.down = true;
   pointer.x = pointer.startX = e.clientX;
@@ -440,8 +462,10 @@ canvas.addEventListener('pointercancel', endPointer);
 
 window.addEventListener('keydown', (e) => {
   if (e.repeat) return;
+  sound.unlock();
   if (e.key === 'p' || e.key === 'P' || e.key === 'Enter') startAutoPress();
   else if (e.key === 'r' || e.key === 'R') reset();
+  else if (e.key === 'm' || e.key === 'M') toggleMute();
   else if (e.key === ' ') {
     view.drift = !view.drift;
     e.preventDefault();
@@ -450,7 +474,34 @@ window.addEventListener('keydown', (e) => {
 });
 
 window.addEventListener('resize', resize);
-again.addEventListener('click', () => reset());
+again.addEventListener('click', () => {
+  sound.unlock();
+  reset();
+});
+muteButton.addEventListener('click', () => {
+  sound.unlock();
+  toggleMute();
+});
+
+function toggleMute() {
+  sound.toggleMute();
+  updateMuteButton();
+}
+
+function updateMuteButton() {
+  muteButton.setAttribute('aria-pressed', String(sound.muted));
+  muteButton.setAttribute('aria-label', sound.muted ? '音を出す' : '音を消す');
+  muteButton.dataset.muted = String(sound.muted);
+}
+
+// 裏のタブに回ったら音を止める（描画も止まるので、シュワシュワが鳴りっぱなしにならないように）。
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) sound.pause();
+  else {
+    sound.resume();
+    wake();
+  }
+});
 
 function updateHint() {
   hint.dataset.state = st.open ? 'open' : 'sealed';
@@ -493,5 +544,6 @@ window.__ramune = {
 };
 
 updateHint();
+updateMuteButton();
 resize();
 if (testMode) render(1);

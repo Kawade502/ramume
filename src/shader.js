@@ -1,7 +1,7 @@
 import { BASE, CAP, DIMPLE, LIP, PROFILE_N } from './bottle.js';
 
 export const MAX_BUB = 64;
-export const MAX_FOAM = 48;
+export const MAX_FOAM = 64;
 
 // 小数点付きの GLSL 定数にする。
 const f = (x) => (Number.isInteger(x) ? `${x}.0` : `${+x.toFixed(5)}`);
@@ -55,6 +55,7 @@ uniform int uFoamN;
 uniform vec3 uFoamLo;
 uniform vec3 uFoamHi;
 uniform float uRipple;
+uniform float uHaze;
 uniform float uTime;
 uniform vec2 uSpin;
 uniform vec3 uColumn;
@@ -204,6 +205,7 @@ vec3 capNormal(vec3 p) {
   );
 }
 
+// あふれた泡のかたまり。w には 半径×100 の整数部と、泡らしさ（0〜1）の小数部を詰めてある。
 float sdFoam(vec3 p) {
   vec3 c = clamp(p, uFoamLo, uFoamHi);
   float db = length(p - c);
@@ -212,12 +214,28 @@ float sdFoam(vec3 p) {
   for (int i = 0; i < ${MAX_FOAM}; i++) {
     if (i >= uFoamN) break;
     vec4 b = uFoam[i];
-    if (b.w <= 0.0) continue;
-    d = smin(d, length(p - b.xyz) - b.w, 3.2);
+    if (b.w < 1.0) continue;
+    d = smin(d, length(p - b.xyz) - floor(b.w) * 0.01, 3.4);
   }
   // 泡のつぶつぶ感。
-  d += 0.2 * sin(p.x * 1.3 + sin(p.y * 1.1)) * sin(p.y * 1.5 + p.z * 0.7) * sin(p.z * 1.4 + p.x * 0.4);
+  d += 0.15 * sin(p.x * 1.3 + sin(p.y * 1.1)) * sin(p.y * 1.5 + p.z * 0.7) * sin(p.z * 1.4 + p.x * 0.4);
   return d;
+}
+
+// その点での泡らしさ。近い泡ほど重く平均する。
+float foaminess(vec3 p) {
+  float wsum = 0.0;
+  float fsum = 0.0;
+  for (int i = 0; i < ${MAX_FOAM}; i++) {
+    if (i >= uFoamN) break;
+    vec4 b = uFoam[i];
+    if (b.w < 1.0) continue;
+    float d = length(p - b.xyz) - floor(b.w) * 0.01;
+    float w = exp(-max(d, 0.0) * 1.5);
+    wsum += w;
+    fsum += w * fract(b.w);
+  }
+  return wsum > 0.0 ? fsum / wsum : 1.0;
 }
 
 vec3 foamNormal(vec3 p) {
@@ -247,6 +265,31 @@ float vnoise(vec3 x) {
     mix(mix(hash3(i + vec3(0, 0, 1)), hash3(i + vec3(1, 0, 1)), f.x),
         mix(hash3(i + vec3(0, 1, 1)), hash3(i + vec3(1, 1, 1)), f.x), f.y),
     f.z);
+}
+
+vec3 hash33(vec3 p) {
+  p = vec3(dot(p, vec3(127.1, 311.7, 74.7)), dot(p, vec3(269.5, 183.3, 246.1)), dot(p, vec3(113.5, 271.9, 124.6)));
+  return fract(sin(p) * 43758.5453);
+}
+
+// 泡の膜の模様（ボロノイ）。x: いちばん近い泡の中心まで, y: 2 番目まで。
+// off はいちばん近い泡の中心へのずれ。
+vec2 voronoi(vec3 x, out vec3 off) {
+  vec3 i = floor(x);
+  vec3 f = fract(x);
+  float f1 = 8.0;
+  float f2 = 8.0;
+  off = vec3(0.0);
+  for (int k = -1; k <= 1; k++)
+  for (int j = -1; j <= 1; j++)
+  for (int n = -1; n <= 1; n++) {
+    vec3 g = vec3(float(n), float(j), float(k));
+    vec3 r = g + hash33(i + g) - f;
+    float d = dot(r, r);
+    if (d < f1) { f2 = f1; f1 = d; off = r; }
+    else if (d < f2) { f2 = d; }
+  }
+  return sqrt(vec2(f1, f2));
 }
 
 // 外から球に当たるときの距離。当たらなければ -1。
@@ -433,38 +476,74 @@ vec3 shadeCap(vec3 hp, vec3 rd, float part) {
   return c * (1.0 - F) + F * sky(reflect(rd, n));
 }
 
-vec3 shadeFoam(vec3 hp, vec3 rd) {
+// あふれた泡の表面。小さな泡ひとつひとつがドームになって光を返す。
+// 泡がつぶれて液に戻るほど透けて、濡れたつやだけが残る。
+void shadeFoam(vec3 hp, vec3 rd, inout vec3 col, inout vec3 thru) {
+  float f = foaminess(hp);
   vec3 n = foamNormal(hp);
-  float wrap = dot(n, LIGHT) * 0.5 + 0.5;
-  vec3 c = vec3(0.96, 0.98, 1.0) * (0.5 + 0.62 * wrap);
-  c += vec3(0.55, 0.85, 0.95) * 0.07 * (1.0 - wrap);
-  float F = 0.03 + 0.97 * pow(1.0 - max(dot(-rd, n), 0.0), 5.0);
-  return c + F * sky(reflect(rd, n)) * 0.5;
+  vec3 off;
+  vec2 v = voronoi(hp * 1.15, off);
+  vec3 offT = off - n * dot(off, n);
+  vec3 bn = normalize(n - offT * mix(0.6, 1.3, f));
+  float wall = 1.0 - smoothstep(0.0, 0.16, v.y - v.x);
+  float wrap = dot(bn, LIGHT) * 0.5 + 0.5;
+  vec3 base = vec3(0.95, 0.97, 1.0) * (0.52 + 0.55 * wrap);
+  base = mix(base * 0.84, vec3(1.02), wall * 0.7);
+  base += vec3(0.55, 0.85, 0.95) * 0.06 * (1.0 - wrap);
+  float F = 0.04 + 0.96 * pow(1.0 - max(dot(-rd, bn), 0.0), 5.0);
+  vec3 spec = sky(reflect(rd, bn)) * mix(0.9, 0.45, f);
+  float opacity = mix(0.06, 0.96, smoothstep(0.05, 0.75, f));
+  col += thru * (base * opacity + F * spec);
+  thru *= (1.0 - opacity) * (1.0 - F);
 }
 
-// 首の中にせり上がる泡の層。瓶の内側の空気を通る区間だけ、白く濁らせる。
+// 首の中にせり上がる泡の層。瓶の内側の空気を通る区間だけ白く濁らせ、
+// ガラスに押し付けられた泡の膜の模様を入口に描く。
 void foamColumn(vec3 p, vec3 rd, float t, inout vec3 col, inout vec3 thru) {
   float t0 = 0.0;
   float t1 = t;
+  float top = uColumn.y + 2.0;
   if (abs(rd.y) > 1e-5) {
     float ta = (uColumn.x - p.y) / rd.y;
-    float tb = (uColumn.y - p.y) / rd.y;
+    float tb = (top - p.y) / rd.y;
     t0 = max(t0, min(ta, tb));
     t1 = min(t1, max(ta, tb));
-  } else if (p.y < uColumn.x || p.y > uColumn.y) {
+  } else if (p.y < uColumn.x || p.y > top) {
     return;
   }
   if (t1 <= t0) return;
   if (sdBottle(p + rd * (0.5 * (t0 + t1))).y > 0.0) return;
+  float dens = 0.0;
+  for (int i = 0; i < 4; i++) {
+    vec3 q = p + rd * mix(t0, t1, (float(i) + 0.5) / 4.0);
+    float n = vnoise(q * 0.5 + vec3(0.0, -uTime * 7.0, 0.0));
+    // 上端はでこぼこにぼかす。
+    float head = uColumn.y + (vnoise(vec3(q.xz * 0.3, uTime * 0.8)) - 0.5) * 5.0;
+    dens += (0.35 + 1.3 * n) * smoothstep(head + 1.0, head - 2.0, q.y);
+  }
+  dens *= 0.25;
+  float T = exp(-uColumn.z * (t1 - t0) * dens);
+  vec3 off;
+  vec2 v = voronoi((p + rd * t0) * 0.75 + vec3(0.0, -uTime * 1.2, 0.0), off);
+  float wall = 1.0 - smoothstep(0.0, 0.22, v.y - v.x);
+  float cellLit = pow(clamp(1.0 - v.x * 1.4, 0.0, 1.0), 3.0);
+  vec3 fc = mix(vec3(0.74, 0.84, 0.89), vec3(1.0), wall);
+  fc += vec3(0.25) * cellLit;
+  col += thru * (1.0 - T) * fc;
+  thru *= T;
+}
+
+// 開けた直後、液全体を白く濁らせる細かい泡。下から上へ流れる筋になる。
+void liquidHaze(vec3 p, vec3 rd, float t, inout vec3 col, inout vec3 thru) {
   float n = 0.0;
   for (int i = 0; i < 3; i++) {
-    vec3 q = p + rd * mix(t0, t1, (float(i) + 0.5) / 3.0);
-    n += vnoise(q * 0.5 + vec3(0.0, -uTime * 7.0, 0.0));
+    vec3 q = p + rd * t * (float(i) + 0.5) / 3.0;
+    float m = vnoise(vec3(q.x * 0.3, q.y * 0.1 - uTime * 3.2, q.z * 0.3));
+    n += m * m;
   }
   n /= 3.0;
-  float T = exp(-uColumn.z * (t1 - t0) * (0.3 + 1.4 * n));
-  vec3 fc = vec3(0.92, 0.96, 0.98) * (0.82 + 0.35 * n);
-  col += thru * (1.0 - T) * fc;
+  float T = exp(-uHaze * t * (0.15 + 2.2 * n));
+  col += thru * (1.0 - T) * vec3(0.86, 0.93, 0.96);
   thru *= T;
 }
 
@@ -492,6 +571,7 @@ vec3 trace(vec3 ro, vec3 rd) {
   vec3 col = vec3(0.0);
   vec3 thru = vec3(1.0);
   int steps = 0;
+  bool foamOff = false; // 透けた泡を一度通り抜けたら、その先は泡を無視する
 
   for (int ev = 0; ev < 16; ev++) {
     // 解析的に求まる面：ビー玉、液面、泡。
@@ -529,8 +609,10 @@ vec3 trace(vec3 ro, vec3 rd) {
       if (med == AIR) {
         vec2 cp = sdCap(q);
         if (cp.x < d) { d = cp.x; k = 2; capPart = cp.y; }
-        float df = sdFoam(q);
-        if (df < d) { d = df; k = 3; }
+        if (!foamOff) {
+          float df = sdFoam(q);
+          if (df < d) { d = df; k = 3; }
+        }
       }
       if (d < EPS) { kind = k; break; }
       float stepLen = d * (abs(q.y - DIMPLE_Y) < 3.0 * DIMPLE_W ? 0.6 : 0.85);
@@ -544,6 +626,7 @@ vec3 trace(vec3 ro, vec3 rd) {
     }
 
     if (med == AIR && uColumn.z > 0.0) foamColumn(p, rd, t, col, thru);
+    if (med == LIQ && uHaze > 0.0) liquidHaze(p, rd, t, col, thru);
     thru *= exp(-absorbOf(med) * t);
     vec3 hp = p + rd * t;
 
@@ -551,7 +634,13 @@ vec3 trace(vec3 ro, vec3 rd) {
       return col + thru * background(hp, rd);
     }
     if (kind == 2) return col + thru * shadeCap(hp, rd, capPart);
-    if (kind == 3) return col + thru * shadeFoam(hp, rd);
+    if (kind == 3) {
+      shadeFoam(hp, rd, col, thru);
+      if (max(thru.r, max(thru.g, thru.b)) < 0.02) return col;
+      foamOff = true;
+      p = hp + rd * 0.05;
+      continue;
+    }
 
     if (kind == 1) {
       vec3 n = glassNormal(hp);

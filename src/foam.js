@@ -27,17 +27,20 @@ function surfaceR(y) {
 }
 
 const COLUMN_TOP = LIP_Y + 1;
+const SITES = 14;
 
 // 開栓後のシュワシュワ。
 // pressure は開けた瞬間に 1 になって減っていく。それに合わせて
-// ・液の中の泡（bubbles）が底や壁から湧いて上り、
+// ・液の中の泡（bubbles）が、壁や底の決まった場所から列になって上り、
+// ・液全体が細かい泡で白く濁り（haze）、
 // ・首の中を泡の層（column）がせり上がり、
-// ・キャップからあふれた泡のかたまり（foam）が首を伝って垂れる。
+// ・キャップからあふれた泡（foam）が首を伝って垂れ、だんだん透明な液に戻る。
 export function createFizz() {
   let rand = mulberry32(7);
   const bubbles = [];
   const foam = [];
   const streams = [];
+  const sites = [];
   let since = -1;
   let pressure = 0;
   let bubAcc = 0;
@@ -48,40 +51,65 @@ export function createFizz() {
     bubbles.length = 0;
     foam.length = 0;
     streams.length = 0;
+    sites.length = 0;
     since = -1;
     pressure = 0;
     bubAcc = 0;
     foamAcc = 0;
   }
 
-  function open() {
+  function open(level) {
     since = 0;
     pressure = 1;
     // あふれた泡が流れ落ちる筋。ひとつは手前側に向ける。
     streams.length = 0;
-    streams.push(Math.PI / 2 + (rand() - 0.5) * 1.2, rand() * Math.PI * 2, rand() * Math.PI * 2);
+    streams.push(Math.PI / 2 + (rand() - 0.5) * 1.0, rand() * Math.PI * 2, rand() * Math.PI * 2);
+    // 泡が湧き続ける場所（ガラスの細かな傷）。同じ場所から出た泡は列になる。
+    sites.length = 0;
+    for (let i = 0; i < SITES; i++) {
+      const th = rand() * Math.PI * 2;
+      if (i < 4) {
+        const rr = 4 + rand() * 18;
+        sites.push({ x: Math.cos(th) * rr, y: 8.6, z: Math.sin(th) * rr });
+      } else {
+        const y = 12 + rand() * Math.max(level - 22, 1);
+        const rr = innerR(y) - 0.5;
+        sites.push({ x: Math.cos(th) * rr, y, z: Math.sin(th) * rr });
+      }
+    }
   }
 
-  function spawnBubble(level) {
+  function spawnBubble(level, P) {
+    if (sites.length && rand() < 0.7) {
+      const s = sites[Math.floor(rand() * sites.length)];
+      return {
+        x: s.x + (rand() - 0.5) * 0.3,
+        y: s.y,
+        z: s.z + (rand() - 0.5) * 0.3,
+        r: 0.16 + rand() * 0.12,
+        ph: rand() * 6.28,
+        wob: 0.6,
+      };
+    }
     const th = rand() * Math.PI * 2;
-    const r0 = 0.22 + rand() * 0.3;
+    const r0 = 0.22 + rand() * 0.3 + P * rand() * 0.7;
     let y;
     let rr;
-    if (rand() < 0.55) {
+    if (rand() < 0.5) {
       y = 8.5 + rand() * 2;
       rr = Math.sqrt(rand()) * 22;
     } else {
       y = 10 + rand() * Math.max(level - 16, 1);
-      rr = innerR(y) - r0 - 0.4;
+      rr = Math.sqrt(rand()) * (innerR(y) - r0 - 0.4);
     }
-    return { x: Math.cos(th) * rr, y, z: Math.sin(th) * rr, r: r0, ph: rand() * 6.28 };
+    return { x: Math.cos(th) * rr, y, z: Math.sin(th) * rr, r: r0, ph: rand() * 6.28, wob: 3 };
   }
 
   // 玉押しのつばの下からあふれ出す泡。
-  function spawnFoam() {
+  function spawnFoam(P) {
     // 半分は玉押しのまわりにまんべんなく、残りは垂れる筋に沿って。
-    const th = rand() < 0.5 ? rand() * Math.PI * 2 : streams[Math.floor(rand() * streams.length)] + (rand() - 0.5) * 0.7;
-    const r0 = 2.8 + rand() * 1.9;
+    const th = rand() < 0.5 ? rand() * Math.PI * 2 : streams[Math.floor(rand() * streams.length)] + (rand() - 0.5) * 0.6;
+    const r0 = 2.2 + rand() * 1.6;
     const rr = CAP.buttonR - 1 + rand() * 2;
     return {
       x: Math.cos(th) * rr,
@@ -89,12 +117,13 @@ export function createFizz() {
       z: Math.sin(th) * rr,
       r: 0,
       r0,
-      vr: 12 + rand() * 18,
-      vy: 0,
-      fall: 14 + rand() * 22,
+      f: 1, // 泡らしさ。1 なら真っ白な泡、0 なら透明な液のしずく
+      vr: 10 + rand() * 16,
+      vy: 25 * P * rand(), // 勢いがあるうちは、つばの上へ盛り上がる
+      fall: 12 + rand() * 20,
       falling: false,
       life: 0,
-      maxLife: 2.0 + rand() * 2.0,
+      maxLife: 2.4 + rand() * 2.2,
     };
   }
 
@@ -107,19 +136,19 @@ export function createFizz() {
     const fizz = since >= 0 ? Math.exp(-since / 10) : 0;
     const level = ctx.level;
 
-    // 液の中の泡：底や壁から生まれ、ふくらみながら上って液面で消える。
-    bubAcc += dt * (260 * P + 24 * fizz);
+    // 液の中の泡：生まれた場所から、ふくらみながら上って液面で消える。
+    bubAcc += dt * (300 * P + 26 * fizz);
     while (bubAcc >= 1) {
       bubAcc -= 1;
-      if (bubbles.length < MAX_BUB) bubbles.push(spawnBubble(level));
+      if (bubbles.length < MAX_BUB) bubbles.push(spawnBubble(level, P));
     }
     for (let i = bubbles.length - 1; i >= 0; i--) {
       const b = bubbles[i];
-      b.r = Math.min(b.r + dt * (0.3 + 0.9 * P), 1.7);
-      b.y += (16 + 34 * b.r + 70 * P) * dt;
+      b.r = Math.min(b.r + dt * (0.25 + 1.0 * P), 2.0);
+      b.y += (14 + 36 * b.r + 80 * P) * dt;
       b.ph += dt * 7;
-      b.x += Math.cos(b.ph) * dt * 3;
-      b.z += Math.sin(b.ph * 1.3) * dt * 3;
+      b.x += Math.cos(b.ph) * dt * b.wob;
+      b.z += Math.sin(b.ph * 1.3) * dt * b.wob;
       const lim = innerR(b.y) - b.r - 0.4;
       const rr = Math.hypot(b.x, b.z);
       if (rr > lim && rr > 0) {
@@ -130,32 +159,36 @@ export function createFizz() {
     }
 
     // 首を満たした泡があふれている間、つばの下から泡を出す。
-    if (since > 0.18 && P > 0.12) foamAcc += dt * 70 * Math.pow(P, 0.7);
+    if (since > 0.15 && P > 0.1) foamAcc += dt * 110 * Math.pow(P, 0.7);
     while (foamAcc >= 1) {
       foamAcc -= 1;
-      if (foam.length < MAX_FOAM) foam.push(spawnFoam());
+      if (foam.length < MAX_FOAM) foam.push(spawnFoam(P));
     }
 
-    // あふれた泡：リングの上を外へ広がり、首を伝ってゆっくり垂れていく。
+    // あふれた泡：リングの上で盛り上がって外へ広がり、首を伝ってゆっくり垂れる。
+    // 垂れながら泡がつぶれて、透明な液のしずくになっていく。
     for (let i = foam.length - 1; i >= 0; i--) {
       const b = foam[i];
       b.life += dt;
       const t = b.life / b.maxLife;
-      b.r = b.r0 * smoothstep(0, 0.12, b.life) * (1 - smoothstep(0.35, 1, t));
+      b.f = 1 - smoothstep(0.3, 0.85, t);
+      b.r = b.r0 * smoothstep(0, 0.12, b.life) * (1 - 0.55 * smoothstep(0.35, 1, t)) * (1 - smoothstep(0.85, 1, t));
       let rr = Math.hypot(b.x, b.z);
       const ux = b.x / rr;
       const uz = b.z / rr;
       if (!b.falling && rr < CAP.collarRo - b.r * 0.2) {
-        // リングの上：外へ押し出される。
+        // リングの上：盛り上がりながら外へ押し出される。
         rr += Math.max(b.vr, 6) * dt;
         b.vr *= Math.exp(-dt * 1.2);
-        b.y = CAP.collarY1 + b.r * 0.3;
+        b.vy -= 300 * dt;
+        b.y = Math.max(CAP.collarY1 + b.r * 0.3, b.y + b.vy * dt);
       } else {
-        // 外側：表面に沿って滑り落ちる。
+        // 外側：表面に沿って滑り落ちる。液に戻るほど速く垂れる。
+        if (!b.falling) b.vy = Math.min(b.vy, 0);
         b.falling = true;
-        b.vy = Math.max(b.vy - 120 * dt, -b.fall);
+        b.vy = Math.max(b.vy - 120 * dt, -b.fall * (1 + (1 - b.f) * 1.5));
         b.y += b.vy * dt;
-        rr = surfaceR(b.y) + b.r * 0.2;
+        rr = surfaceR(b.y) + b.r * (0.1 + 0.15 * b.f);
       }
       b.x = ux * rr;
       b.z = uz * rr;
@@ -169,9 +202,12 @@ export function createFizz() {
     const P = pressure;
     const surge = Math.min(1 - Math.exp(-since / 0.09), smoothstep(0.03, 0.4, P));
     const top = Math.max(level + (COLUMN_TOP - level) * surge, level + 4 * Math.exp(-since / 5));
-    const density = 0.17 * (0.3 + 0.7 * smoothstep(0, 0.5, P));
+    const density = 0.26 * (0.3 + 0.7 * smoothstep(0, 0.5, P));
     return [level - 1.5, top, top - level > 0.3 ? density : 0];
   }
+
+  // 液の濁り（細かい泡）の濃さ。1mm あたり。
+  const haze = () => (since < 0 ? 0 : 0.03 * Math.pow(pressure, 1.3));
 
   const active = () => pressure > 0.004 || bubbles.length > 0 || foam.length > 0 || (since >= 0 && since < 30);
 
@@ -180,6 +216,7 @@ export function createFizz() {
     open,
     step,
     column,
+    haze,
     active,
     bubbles,
     foam,
@@ -188,6 +225,9 @@ export function createFizz() {
     },
     get since() {
       return since;
+    },
+    get trail() {
+      return since < 0 ? 0 : Math.exp(-since / 10);
     },
   };
 }

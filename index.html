@@ -9,10 +9,17 @@
   <body>
     <canvas id="stage"></canvas>
     <h1 class="title">ラムネ</h1>
+    <button type="button" class="mute" id="mute" aria-pressed="false" aria-label="音を消す">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path class="speaker" d="M4 9h3l5-4v14l-5-4H4z" />
+        <path class="waves" d="M15.5 8.5a5 5 0 0 1 0 7M18 6a8.5 8.5 0 0 1 0 12" />
+        <path class="cross" d="M16 9l6 6M22 9l-6 6" />
+      </svg>
+    </button>
     <div class="hint" id="hint" data-state="sealed">
       <p class="sealed">キャップを押し下げて、ビー玉を落とそう</p>
       <p class="open">シュワッ。<button type="button" id="again">新しい瓶</button></p>
-      <p class="sub keys">ドラッグで回す ・ <kbd>P</kbd> 開ける ・ <kbd>R</kbd> 新しい瓶 ・ <kbd>Space</kbd> 回転</p>
+      <p class="sub keys">ドラッグで回す ・ <kbd>P</kbd> 開ける ・ <kbd>R</kbd> 新しい瓶 ・ <kbd>Space</kbd> 回転 ・ <kbd>M</kbd> 音</p>
       <p class="sub touch">キャップをタップしても開くよ ・ ドラッグで回す</p>
     </div>
     <p class="error" id="error" hidden>この端末では WebGL2 が使えないため表示できません。</p>
