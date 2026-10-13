@@ -1,0 +1,122 @@
+:root {
+  --bg: #f6eedc;
+  --ink: #2a4a5a;
+  --ink-soft: #6b8590;
+  --key: #ffffffb3;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: 'Hiragino Maru Gothic ProN', 'Hiragino Sans', 'Noto Sans JP', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+#stage {
+  position: fixed;
+  inset: 0;
+  display: block;
+  touch-action: none;
+  cursor: grab;
+}
+
+.title {
+  position: fixed;
+  top: max(16px, env(safe-area-inset-top));
+  left: 20px;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.3em;
+  pointer-events: none;
+}
+
+.hint {
+  position: fixed;
+  left: 16px;
+  right: 16px;
+  bottom: max(18px, env(safe-area-inset-bottom));
+  text-align: center;
+  font-size: 14px;
+  line-height: 1.7;
+  pointer-events: none;
+}
+
+.hint p {
+  margin: 0;
+}
+
+.hint .sub {
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.hint[data-state='sealed'] .open,
+.hint[data-state='open'] .sealed {
+  display: none;
+}
+
+.hint .touch {
+  display: none;
+}
+
+@media (hover: none) {
+  .hint .keys {
+    display: none;
+  }
+  .hint .touch {
+    display: block;
+  }
+}
+
+#again {
+  pointer-events: auto;
+  margin-left: 0.6em;
+  padding: 0.15em 0.9em;
+  font: inherit;
+  color: #fff;
+  background: #1d5fd8;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+#again:hover {
+  background: #2f72e8;
+}
+
+#again:focus-visible {
+  outline: 2px solid #1d5fd8;
+  outline-offset: 2px;
+}
+
+kbd {
+  font: inherit;
+  font-size: 0.9em;
+  padding: 0 0.35em;
+  border-radius: 4px;
+  background: var(--key);
+  border: 1px solid #2a4a5a26;
+}
+
+.error {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  padding: 16px;
+  text-align: center;
+}
+
+.error[hidden] {
+  display: none;
+}
