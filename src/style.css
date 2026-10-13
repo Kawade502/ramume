@@ -129,8 +129,31 @@ body {
   color: var(--ink-soft);
 }
 
-.hint[data-state='sealed'] .open,
-.hint[data-state='open'] .sealed {
+.hint .msg {
+  display: none;
+}
+
+.hint[data-state='sealed'] [data-for='sealed'],
+.hint[data-state='closed'] [data-for='closed'],
+.hint[data-state='open'] [data-for='open'],
+.hint[data-state='blocked'] [data-for='blocked'],
+.hint[data-state='empty'] [data-for='empty'] {
+  display: inline;
+}
+
+.hint[data-state='blocked'] [data-for='blocked'] {
+  color: #b5452b;
+  font-weight: 600;
+}
+
+.hint .left {
+  margin-left: 0.6em;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.hint[data-state='sealed'] #again,
+.hint[data-state='closed'] #again {
   display: none;
 }
 

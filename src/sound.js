@@ -4,6 +4,8 @@
 //   シュワ    液の中で泡がはじける細かいパチパチと、吹き出す瞬間のシャー
 //   ブクブク  キャップからあふれる泡
 //   コロコロ  ビー玉が瓶の内側を転がっている間
+//   ゴクッ    ひと口飲むたび
+//   コポッ    飲んで口から空気が入り、大きな泡が上るとき
 //   カチッ    玉押しを押し始めたとき
 //   コトッ    新しい瓶を置いたとき
 
@@ -109,6 +111,26 @@ export function createVoices(ctx, out) {
     tone(t, 'sine', 1250, 1250, 0, 0.1, 0.001, 0.012);
   }
 
+  function gulp(t) {
+    // のどを通る低い「ゴクッ」。
+    tone(t, 'sine', 170, 80, 0.09, 0.55, 0.004, 0.14);
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 350;
+    noiseAt(t, 0.08).connect(lp).connect(gainAt(t, 0.3, 0.003, 0.06));
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = 1200;
+    bp.Q.value = 2;
+    noiseAt(t, 0.02).connect(bp).connect(gainAt(t, 0.12, 0.001, 0.01));
+  }
+
+  // 泡が生まれたときの「コポッ」。大きい泡ほど低い（半径 r mm）。
+  function glug(t, r = 4) {
+    const f = Math.min(1600, 3260 / r);
+    tone(t, 'sine', f * 0.85, f * 1.6, 0.06, 0.35, 0.002, 0.1);
+  }
+
   function thunk(t) {
     tone(t, 'sine', 190, 95, 0.06, 0.5, 0.002, 0.15);
     const lp = ctx.createBiquadFilter();
@@ -165,7 +187,7 @@ export function createVoices(ctx, out) {
     },
   };
 
-  return { pop, clink, click, thunk, fizz, roll };
+  return { pop, clink, click, thunk, gulp, glug, fizz, roll };
 }
 
 const MUTE_KEY = 'ramune:muted';
@@ -212,6 +234,12 @@ export function createSound() {
     },
     thunk() {
       if (ready()) voices.thunk(ctx.currentTime);
+    },
+    gulp() {
+      if (ready()) voices.gulp(ctx.currentTime);
+    },
+    glug(r, delay = 0) {
+      if (ready()) voices.glug(ctx.currentTime + delay, r);
     },
     setFizz(pressure, trail, overflow) {
       if (ready()) voices.fizz.set(pressure, trail, overflow, ctx.currentTime);

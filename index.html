@@ -23,10 +23,17 @@
       </svg>
     </button>
     <div class="hint" id="hint" data-state="sealed">
-      <p class="sealed">キャップを押し下げて、ビー玉を落とそう</p>
-      <p class="open">瓶をつかんで傾けると、ビー玉が転がるよ<button type="button" id="again">新しい瓶</button></p>
-      <p class="sub keys">瓶をドラッグ・<kbd>←</kbd><kbd>→</kbd> で傾ける ・ まわりをドラッグで回す ・ <kbd>P</kbd> 開ける ・ <kbd>R</kbd> 新しい瓶 ・ <kbd>M</kbd> 音</p>
-      <p class="sub touch">瓶を左右にドラッグで傾ける ・ キャップをタップでも開くよ</p>
+      <p class="line">
+        <span class="msg" data-for="sealed">キャップを押し下げて、ビー玉を落とそう</span>
+        <span class="msg" data-for="closed">まずはキャップを押して開けよう</span>
+        <span class="msg" data-for="open">瓶をタップでひと口。つかんで傾けるとビー玉が転がるよ</span>
+        <span class="msg" data-for="blocked">ビー玉が口をふさいだ！ 凹みを下に向けると飲めるよ</span>
+        <span class="msg" data-for="empty">ごちそうさま！</span>
+        <span class="left" id="left"></span>
+        <button type="button" id="again">新しい瓶</button>
+      </p>
+      <p class="sub keys">瓶をタップ・<kbd>D</kbd> でひと口 ・ 瓶をドラッグ・<kbd>←</kbd><kbd>→</kbd> で傾ける ・ まわりをドラッグで回す ・ <kbd>P</kbd> 開ける ・ <kbd>R</kbd> 新しい瓶 ・ <kbd>M</kbd> 音</p>
+      <p class="sub touch">瓶をタップでひと口 ・ 左右にドラッグで傾ける ・ キャップをタップでも開くよ</p>
     </div>
     <p class="error" id="error" hidden>この端末では WebGL2 が使えないため表示できません。</p>
     <script type="module" src="./src/main.js"></script>

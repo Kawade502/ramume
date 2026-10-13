@@ -29,11 +29,18 @@ const POP_AT = 2.0; // 玉押しをこれだけ押すとビー玉が外れる (m
 const PRESS_RATIO = 0.3; // 画面上で 1mm ドラッグすると 0.3mm 押し込む
 const TAP_SLOP = 6;
 
-const TILT_MAX = THREE.MathUtils.degToRad(120);
+const TILT_MAX = THREE.MathUtils.degToRad(145);
 const TILT_PER_PX = 0.0075; // 瓶をつかんで 1px 横に動かしたときの傾き (rad)
 const TILT_KEY = THREE.MathUtils.degToRad(100); // ←→ キーを押している間の傾き
 const PIVOT = new THREE.Vector3(0, 100, 0); // 手で持つあたり。ここを中心に傾ける
 const HOLD_LIFT = 6; // 持ち上げたときに床から浮かせる高さ (mm)
+
+const MOUTH = [0, LIP_Y - 4, 0]; // 飲み口（ローカル座標）。ここが液に沈んでいれば飲める
+const GULP = 0.55; // ひと口のリズム (秒)
+const GULP_FLOW = 0.32; // そのうち液が流れ出ている時間 (秒)
+const DRINK_RATE = 30000; // 流れ出ている間の量 (mm³/s)
+const EMPTY = 4000; // これより少なければ「ごちそうさま」(mm³)
+const SIP_HOLD = 1.9; // ひと口飲むとき、傾けたままにする時間 (秒)
 
 // 自動で押すときの動き [秒, 押し込み mm]。
 const AUTO_PRESS = [
@@ -54,6 +61,7 @@ const errorBox = document.getElementById('error');
 const again = document.getElementById('again');
 const muteButton = document.getElementById('mute');
 const tiltButton = document.getElementById('tilt');
+const leftText = document.getElementById('left');
 
 let renderer;
 try {
@@ -134,9 +142,18 @@ const st = {
   pushV: 0,
   pushTarget: 0,
   volume: LIQUID_VOLUME,
+  drunk: 0, // 飲んだ量 (mm³)
   auto: -1, // 自動で押している時間。-1 なら止まっている
   lastClink: -1,
+  pusherOff: 0, // 玉押しを外す動き（0〜1）。1 で外れて見えなくなる
+  removing: false,
+  gulpT: -1, // ひと口のリズムの経過時間。-1 なら飲んでいない
+  blockedT: 0, // ビー玉が口をふさいでいる時間
+  sip: null, // ひと口飲む自動の動き { t, angle }
+  glugs: [], // これから口から入る空気の泡 [{ at: 秒, r: 半径 }]
+  notice: '', // ヒント欄に一時的に出す状態
 };
+let noticeTimer = 0;
 
 // 照明は固定したまま瓶を軸まわりに回す（左右対称なので、凹みの向きだけが変わる）。
 // 最初は凹みを手前と奥に向けておく。左右に傾けると、ビー玉が凹みに引っかからずに転がる。
@@ -184,7 +201,15 @@ function reset() {
   st.pushV = 0;
   st.pushTarget = 0;
   st.volume = LIQUID_VOLUME;
+  st.drunk = 0;
   st.auto = -1;
+  st.pusherOff = 0;
+  st.removing = false;
+  st.gulpT = -1;
+  st.blockedT = 0;
+  st.sip = null;
+  st.glugs.length = 0;
+  showNotice('', 0);
   marble.reset();
   fizz.reset();
   sound.setFizz(0, 0, 0);
@@ -203,9 +228,44 @@ function pop() {
 }
 
 function startAutoPress() {
-  if (st.auto >= 0) return;
+  if (st.auto >= 0 || st.pusherOff > 0) return;
   st.auto = 0;
   wake();
+}
+
+// ひと口飲む：凹みを下に向けて持ち上げ、残りの量に合わせた角度まで傾ける。
+function startSip() {
+  if (!st.open || st.sip || isEmpty()) return;
+  st.removing = true;
+  view.spinGoal = Math.round(view.spinGoal / Math.PI) * Math.PI;
+  st.sip = { t: 0, angle: -sipAngle() };
+  wake();
+}
+
+const isEmpty = () => st.volume < EMPTY;
+
+// 凹みを下に向けて傾けたとき、飲み口が液に沈むいちばん浅い角度に、少し余裕を足す。
+// 口を少し下げたほうが、入った空気の泡が胴のほうへ上っていくのが見える。
+function sipAngle() {
+  const deg = THREE.MathUtils.degToRad;
+  for (let d = 80; d <= 140; d += 2.5) {
+    const a = deg(d);
+    const up = [Math.sin(a), Math.cos(a), 0];
+    if (MOUTH[1] * up[1] < liquidPlane(up, st.volume) - 3) return Math.min(Math.max(a + deg(12), deg(108)), deg(138));
+  }
+  return deg(138);
+}
+
+function showNotice(name, seconds) {
+  st.notice = name;
+  clearTimeout(noticeTimer);
+  if (seconds > 0) {
+    noticeTimer = setTimeout(() => {
+      st.notice = '';
+      updateHint();
+    }, seconds * 1000);
+  }
+  updateHint();
 }
 
 function sample(frames, t) {
@@ -284,7 +344,12 @@ function simulate(dt) {
   // 傾き：つかむ／キー／センサーで目標を決め、少し揺れながら追いつく。
   let goal = 0;
   let holding = false;
-  if (pointer.mode === 'tilt') {
+  if (st.sip) {
+    st.sip.t += dt;
+    goal = st.sip.angle;
+    holding = true;
+    if (st.sip.t > 0.6 + SIP_HOLD) st.sip = null;
+  } else if (pointer.mode === 'tilt') {
     goal = pose.tiltGoal;
     holding = true;
   } else if (pose.keys.left !== pose.keys.right) {
@@ -342,7 +407,8 @@ function simulate(dt) {
     }
   }
 
-  if (st.open) st.volume = LIQUID_VOLUME - SPILL * (1 - Math.exp(-fizz.since / 1.3));
+  drink(dt);
+  if (st.open) st.volume = Math.max(0, LIQUID_VOLUME - SPILL * (1 - Math.exp(-fizz.since / 1.3)) - st.drunk);
 
   fizz.step(dt, { up, liqD: d, level: levelOnAxis() });
 
@@ -361,6 +427,59 @@ function lookGoal(out) {
   return out;
 }
 
+// 飲む：飲み口が液に沈み、ビー玉がふさいでいなければ、ゴクッゴクッと減っていく。
+function drink(dt) {
+  if (!st.open) return;
+  // 開けた瓶を大きく傾けたら、手で玉押しを外す。
+  if (Math.abs(pose.tilt) > 1.0) st.removing = true;
+  if (st.removing && st.pusherOff < 1) st.pusherOff = Math.min(1, st.pusherOff + dt / 0.35);
+
+  const up = frame.up;
+  const submerged = MOUTH[0] * up[0] + MOUTH[1] * up[1] + MOUTH[2] * up[2] < frame.liqD - 2;
+  const m = marble.pos;
+  const blocked = Math.hypot(m[0], m[1] - MARBLE_STOPS.seal, m[2]) < 2.5;
+  const can = submerged && !blocked && st.pusherOff >= 1 && !isEmpty();
+
+  if (submerged && blocked && st.pusherOff >= 1) {
+    st.blockedT += dt;
+    if (st.blockedT > 0.3 && st.notice !== 'blocked') {
+      showNotice('blocked', 3.5);
+      sound.glug(2.2);
+    }
+  } else {
+    st.blockedT = 0;
+  }
+
+  if (!can) {
+    st.gulpT = -1;
+    st.glugs.length = 0;
+    return;
+  }
+  const before = st.gulpT;
+  st.gulpT = before < 0 ? 0 : st.gulpT + dt;
+  const phase = st.gulpT % GULP;
+  const prevPhase = before < 0 ? GULP : before % GULP;
+  if (phase < prevPhase) {
+    // ひと口の始まり：ゴクッ。飲み口から空気が入って、大きな泡から小さな泡へ、コポコポと続いて上る。
+    sound.gulp();
+    const sizes = [3.4 + Math.random() * 1.2, 2.2 + Math.random(), 1.4 + Math.random() * 0.8, 0.8 + Math.random() * 0.5];
+    sizes.forEach((r, i) => st.glugs.push({ at: 0.1 + i * 0.07 + Math.random() * 0.03, r }));
+  }
+  for (let i = st.glugs.length - 1; i >= 0; i--) {
+    const g = st.glugs[i];
+    g.at -= dt;
+    if (g.at > 0) continue;
+    st.glugs.splice(i, 1);
+    fizz.glug((Math.random() - 0.5) * 3, MOUTH[1] - 6 - Math.random() * 3, (Math.random() - 0.5) * 3, g.r);
+    if (g.r > 1.8) sound.glug(g.r);
+  }
+  if (phase < GULP_FLOW) st.drunk += DRINK_RATE * dt;
+  if (isEmpty()) {
+    st.gulpT = -1;
+    showNotice('', 0);
+  }
+}
+
 function isMoving() {
   return (
     turning() ||
@@ -374,6 +493,9 @@ function isMoving() {
     Math.abs(pose.held - pose.heldGoal) > 1e-3 ||
     pose.liftV !== 0 ||
     st.auto >= 0 ||
+    !!st.sip ||
+    st.gulpT >= 0 ||
+    (st.removing && st.pusherOff < 1) ||
     Math.abs(st.push - st.pushTarget) > 1e-3 ||
     Math.abs(st.pushV) > 1e-2 ||
     marble.moving ||
@@ -417,8 +539,13 @@ function updateUniforms() {
 
   const m = marble.pos;
   uniforms.uMarble.value.set(m[0], m[1], m[2], MARBLE_R);
-  uniforms.uPushY.value = CAP.restY - st.push;
-  uniforms.uRipple.value = Math.min(fizz.pressure * 1.6, 1) + (fizz.bubbles.length ? 0.08 : 0) + Math.min(Math.abs(pose.tiltV) * 0.15, 0.6);
+  // 外した玉押しは、上へ抜けて見えなくなる。
+  uniforms.uPushY.value = st.pusherOff >= 1 ? 1e4 : CAP.restY - st.push + 40 * st.pusherOff * st.pusherOff;
+  uniforms.uRipple.value =
+    Math.min(fizz.pressure * 1.6, 1) +
+    (fizz.bubbles.length ? 0.08 : 0) +
+    Math.min(Math.abs(pose.tiltV) * 0.15, 0.6) +
+    (st.gulpT >= 0 ? 0.5 : 0);
   uniforms.uTime.value = st.time;
   // 首の泡の層は、瓶がほぼ立っているときだけ。
   const col = fizz.column(levelOnAxis());
@@ -513,6 +640,7 @@ function tick(now) {
   }
 
   updateLoopSound();
+  updateHint();
 
   if (isMoving()) {
     // 重いときは解像度を下げ、余裕があれば戻す。
@@ -652,6 +780,10 @@ function endPointer(e) {
   if (pointer.mode === 'press') {
     if (pointer.moved < TAP_SLOP) startAutoPress();
     else st.pushTarget = 0;
+  } else if (pointer.mode === 'tilt' && pointer.moved < TAP_SLOP) {
+    // 瓶をタップしたら、ひと口飲む（開ける前なら開け方を教える）。
+    if (st.open) startSip();
+    else showNotice('closed', 2.5);
   }
   pointer.mode = null;
   canvas.style.cursor = cursorFor(e.clientX, e.clientY);
@@ -671,6 +803,10 @@ window.addEventListener('keydown', (e) => {
   if (e.repeat) return;
   sound.unlock();
   if (e.key === 'p' || e.key === 'P' || e.key === 'Enter') startAutoPress();
+  else if (e.key === 'd' || e.key === 'D') {
+    if (st.open) startSip();
+    else showNotice('closed', 2.5);
+  }
   else if (e.key === 'r' || e.key === 'R') reset();
   else if (e.key === 'm' || e.key === 'M') toggleMute();
   else if (e.key === ' ') {
@@ -765,13 +901,18 @@ document.addEventListener('visibilitychange', () => {
 });
 
 function updateHint() {
-  hint.dataset.state = st.open ? 'open' : 'sealed';
+  let state = st.open ? 'open' : 'sealed';
+  if (st.open && isEmpty()) state = 'empty';
+  else if (st.notice) state = st.notice;
+  hint.dataset.state = state;
+  leftText.textContent = st.drunk > 0 ? `のこり ${Math.round(st.volume / 1000)}ml` : '';
 }
 
 // ---------------------------------------------------------------- テスト用の入口
 
 window.__ramune = {
   press: startAutoPress,
+  sip: startSip,
   reset,
   hold(mm) {
     st.pushTarget = Math.min(Math.max(mm, 0), CAP.maxPush);
@@ -798,10 +939,12 @@ window.__ramune = {
     view.pitch = view.pitchGoal = pitch;
   },
   render(s = 1) {
+    updateHint();
     render(s);
     renderer.getContext().finish();
   },
   overBottle,
+  bubbles: () => fizz.bubbles.filter((b) => b.big).map((b) => [b.x, b.y, b.z, b.r].map((v) => +v.toFixed(1))),
   state: () => ({
     open: st.open,
     push: +st.push.toFixed(3),
@@ -810,6 +953,9 @@ window.__ramune = {
     lift: +pose.lift.toFixed(2),
     liqD: +frame.liqD.toFixed(2),
     volumeMl: +(st.volume / 1000).toFixed(2),
+    drunkMl: +(st.drunk / 1000).toFixed(1),
+    hint: hint.dataset.state,
+    pusherOff: +st.pusherOff.toFixed(2),
     pressure: +fizz.pressure.toFixed(3),
     bubbles: fizz.bubbles.length,
     foam: fizz.foam.length,

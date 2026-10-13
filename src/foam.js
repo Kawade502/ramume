@@ -151,9 +151,9 @@ export function createFizz() {
     }
     for (let i = bubbles.length - 1; i >= 0; i--) {
       const b = bubbles[i];
-      b.r = Math.min(b.r + dt * (0.25 + 1.0 * P), 2.0);
+      if (!b.big) b.r = Math.min(b.r + dt * (0.25 + 1.0 * P), 2.0);
       // 浮力で、世界の上向きへ上る。
-      const rise = (14 + 36 * b.r + 80 * P) * dt;
+      const rise = (b.big ? 70 + 25 * b.r : 14 + 36 * b.r + 80 * P) * dt;
       b.x += up[0] * rise;
       b.y += up[1] * rise;
       b.z += up[2] * rise;
@@ -220,12 +220,23 @@ export function createFizz() {
   // 液の濁り（細かい泡）の濃さ。1mm あたり。
   const haze = () => (since < 0 ? 0 : 0.03 * Math.pow(pressure, 1.3));
 
+  // 飲んだとき口から入る空気の大きな泡（ゴボッ）。いっぱいなら小さな泡と入れ替える。
+  function glug(x, y, z, r) {
+    if (bubbles.length >= MAX_BUB) {
+      const i = bubbles.findIndex((b) => !b.big);
+      if (i < 0) return;
+      bubbles.splice(i, 1);
+    }
+    bubbles.push({ x, y, z, r, ph: rand() * 6.28, wob: 6, big: true });
+  }
+
   const active = () => pressure > 0.004 || bubbles.length > 0 || foam.length > 0 || (since >= 0 && since < 30);
 
   return {
     reset,
     open,
     step,
+    glug,
     column,
     haze,
     active,
